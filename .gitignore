@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Local config
+.env
+.env.local
+
+# Test files
+*.profdata
+*.profraw

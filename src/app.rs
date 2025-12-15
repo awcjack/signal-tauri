@@ -101,18 +101,25 @@ impl SignalApp {
     fn initialize_signal_manager(&mut self) {
         let storage = self.storage.clone();
         let signal_manager = self.signal_manager.clone();
-        let runtime = self.runtime.clone();
 
-        runtime.spawn(async move {
-            match SignalManager::from_storage(&storage).await {
-                Ok(manager) => {
-                    *signal_manager.write() = Some(manager);
-                    tracing::info!("Signal manager initialized successfully");
+        // Use a dedicated thread for presage operations since its futures aren't Send-safe
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime for Signal manager");
+
+            rt.block_on(async move {
+                match SignalManager::from_storage(&storage).await {
+                    Ok(manager) => {
+                        *signal_manager.write() = Some(manager);
+                        tracing::info!("Signal manager initialized successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to initialize Signal manager: {}", e);
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to initialize Signal manager: {}", e);
-                }
-            }
+            });
         });
 
         self.initialized = true;
@@ -158,15 +165,20 @@ impl eframe::App for SignalApp {
         ctx.request_repaint();
 
         // Show error toast if present
+        let mut dismiss_error = false;
         if let Some(ref error) = self.error_message {
+            let error_text = error.clone();
             egui::TopBottomPanel::top("error_panel").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
+                    ui.colored_label(egui::Color32::RED, format!("Error: {}", error_text));
                     if ui.button("Dismiss").clicked() {
-                        self.error_message = None;
+                        dismiss_error = true;
                     }
                 });
             });
+        }
+        if dismiss_error {
+            self.error_message = None;
         }
 
         // Show connection status bar

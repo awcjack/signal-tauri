@@ -126,7 +126,7 @@ impl SignalTheme {
 
         // Window
         visuals.window_rounding = Rounding::same(12.0);
-        visuals.window_shadow.extrusion = 16.0;
+        visuals.window_shadow.blur = 16.0;
 
         visuals
     }
@@ -166,7 +166,7 @@ impl SignalTheme {
 
         // Window
         visuals.window_rounding = Rounding::same(12.0);
-        visuals.window_shadow.extrusion = 8.0;
+        visuals.window_shadow.blur = 8.0;
 
         visuals
     }

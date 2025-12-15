@@ -4,6 +4,7 @@ use crate::ui::theme::SignalColors;
 use egui::{Color32, Vec2};
 
 /// Badge type
+#[derive(Clone)]
 pub enum BadgeType {
     /// Numeric badge showing count
     Count(u32),
@@ -56,10 +57,10 @@ impl Badge {
 
     /// Show the badge
     pub fn show(self, ui: &mut egui::Ui) -> egui::Response {
-        match &self.badge_type {
-            BadgeType::Count(count) => self.show_count(ui, *count),
+        match self.badge_type.clone() {
+            BadgeType::Count(count) => self.show_count(ui, count),
             BadgeType::Dot => self.show_dot(ui),
-            BadgeType::Text(text) => self.show_text(ui, text),
+            BadgeType::Text(text) => self.show_text(ui, &text),
         }
     }
 

@@ -123,6 +123,37 @@ impl Storage {
         &self.avatars_dir
     }
 
+    /// Get path to Signal protocol database (for presage)
+    pub fn signal_db_path(&self) -> PathBuf {
+        self.data_dir.join("signal_protocol.db")
+    }
+
+    /// Get encryption key for the database
+    /// In production, this should be derived from user credentials or secure storage
+    pub fn get_encryption_key(&self) -> Option<String> {
+        // Check for stored encryption key
+        let key_path = self.data_dir.join(".encryption_key");
+        if key_path.exists() {
+            if let Ok(key) = std::fs::read_to_string(&key_path) {
+                return Some(key.trim().to_string());
+            }
+        }
+
+        // Generate and store new key
+        use base64::Engine;
+        let mut key_bytes = [0u8; 32];
+        getrandom::fill(&mut key_bytes).ok()?;
+        let key = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
+
+        // Store the key
+        if std::fs::write(&key_path, &key).is_ok() {
+            tracing::info!("Generated new encryption key");
+            return Some(key);
+        }
+
+        None
+    }
+
     /// Save account credentials
     pub fn save_account(&mut self, phone_number: &str, device_id: u32) -> Result<()> {
         let config = serde_json::json!({

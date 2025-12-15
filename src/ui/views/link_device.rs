@@ -200,27 +200,40 @@ fn start_linking_process(app: &mut SignalApp) {
 
 /// Render a QR code from data
 pub fn render_qr_code(data: &str) -> Option<egui::ColorImage> {
-    use qrcode::{QrCode, Color as QrColor};
+    use qrcode::QrCode;
 
     let code = QrCode::new(data.as_bytes()).ok()?;
-    let image = code.render::<QrColor>().build();
+    let modules = code.to_colors();
+    let size = (modules.len() as f64).sqrt() as usize;
 
-    let width = image.width() as usize;
-    let height = image.height() as usize;
+    // Add quiet zone (border)
+    let quiet_zone = 4;
+    let scale = 8; // Scale up for better visibility
+    let full_size = (size + quiet_zone * 2) * scale;
 
-    let pixels: Vec<Color32> = image
-        .pixels()
-        .map(|p| {
-            if *p == QrColor::Dark {
-                Color32::BLACK
-            } else {
-                Color32::WHITE
+    let mut pixels = vec![Color32::WHITE; full_size * full_size];
+
+    for (i, module) in modules.iter().enumerate() {
+        let row = i / size;
+        let col = i % size;
+
+        let is_dark = *module == qrcode::Color::Dark;
+        let color = if is_dark { Color32::BLACK } else { Color32::WHITE };
+
+        // Scale up and apply quiet zone offset
+        for dy in 0..scale {
+            for dx in 0..scale {
+                let x = (col + quiet_zone) * scale + dx;
+                let y = (row + quiet_zone) * scale + dy;
+                if x < full_size && y < full_size {
+                    pixels[y * full_size + x] = color;
+                }
             }
-        })
-        .collect();
+        }
+    }
 
     Some(egui::ColorImage {
-        size: [width, height],
+        size: [full_size, full_size],
         pixels,
     })
 }

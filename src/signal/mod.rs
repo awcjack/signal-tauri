@@ -6,7 +6,7 @@ pub mod contacts;
 pub mod groups;
 pub mod attachments;
 
-pub use manager::SignalManager;
+pub use manager::{ConnectionState, SignalEvent, SignalManager};
 
 use thiserror::Error;
 

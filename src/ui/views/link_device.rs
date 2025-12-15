@@ -1,54 +1,14 @@
 //! Device linking view - shows QR code for linking to existing Signal account
 
-use crate::app::SignalApp;
-use crate::signal::SignalManager;
+use crate::app::{LinkingState, SignalApp};
 use crate::ui::theme::SignalColors;
-use egui::{Color32, Pos2, Rect, Rounding, Sense, Stroke, Vec2};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-
-/// State for device linking process
-#[derive(Debug, Clone)]
-pub enum LinkingState {
-    /// Generating QR code
-    Generating,
-    /// Displaying QR code, waiting for scan
-    WaitingForScan { qr_data: String, provisioning_url: String },
-    /// User scanned, processing link
-    Processing,
-    /// Successfully linked
-    Success,
-    /// Error occurred
-    Error(String),
-}
-
-/// Device linking view state
-pub struct LinkDeviceView {
-    state: LinkingState,
-    device_name: String,
-}
-
-impl Default for LinkDeviceView {
-    fn default() -> Self {
-        Self {
-            state: LinkingState::Generating,
-            device_name: get_device_name(),
-        }
-    }
-}
-
-/// Get a default device name
-fn get_device_name() -> String {
-    let hostname = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "Desktop".to_string());
-
-    format!("Signal Desktop ({})", hostname)
-}
+use egui::{Color32, Rect, Rounding, Sense, Vec2};
 
 /// Show the device linking view
 pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
+    // Start linking if not already started
+    app.start_linking();
+
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(40.0);
@@ -77,7 +37,7 @@ pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
 
             // QR Code display area
             let qr_size = 280.0;
-            let (rect, response) = ui.allocate_exact_size(
+            let (rect, _response) = ui.allocate_exact_size(
                 Vec2::new(qr_size, qr_size),
                 Sense::hover(),
             );
@@ -89,63 +49,129 @@ pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
                 Color32::WHITE,
             );
 
-            // Draw placeholder QR code pattern (will be replaced with real QR)
-            draw_placeholder_qr(ui, rect);
-
-            ui.add_space(24.0);
-
-            // Device name input
-            ui.horizontal(|ui| {
-                ui.label("Device name:");
-                // We'd have a text input here for device name
-            });
+            // Show content based on linking state
+            match app.linking_state() {
+                LinkingState::NotStarted | LinkingState::Generating => {
+                    // Show loading spinner/placeholder
+                    draw_loading_placeholder(ui, rect);
+                    ui.add_space(24.0);
+                    ui.colored_label(
+                        SignalColors::TEXT_SECONDARY,
+                        "Generating QR code...",
+                    );
+                }
+                LinkingState::WaitingForScan { qr_texture, .. } => {
+                    // Show actual QR code
+                    if let Some(texture) = qr_texture {
+                        let qr_rect = Rect::from_center_size(
+                            rect.center(),
+                            Vec2::splat(qr_size - 20.0),
+                        );
+                        ui.painter().image(
+                            texture.id(),
+                            qr_rect,
+                            Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(1.0, 1.0),
+                            ),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        draw_placeholder_qr(ui, rect);
+                    }
+                    ui.add_space(24.0);
+                    ui.colored_label(
+                        SignalColors::TEXT_SECONDARY,
+                        "Waiting for phone to scan QR code...",
+                    );
+                }
+                LinkingState::Processing => {
+                    draw_loading_placeholder(ui, rect);
+                    ui.add_space(24.0);
+                    ui.colored_label(
+                        SignalColors::SIGNAL_BLUE,
+                        "Processing link...",
+                    );
+                }
+                LinkingState::Success => {
+                    // Show success - this shouldn't normally show as we transition to ChatList
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        60.0,
+                        SignalColors::SIGNAL_BLUE,
+                    );
+                    ui.add_space(24.0);
+                    ui.colored_label(
+                        Color32::GREEN,
+                        "Device linked successfully!",
+                    );
+                }
+                LinkingState::Error(error) => {
+                    // Show error state
+                    draw_error_state(ui, rect);
+                    ui.add_space(24.0);
+                    ui.colored_label(
+                        Color32::RED,
+                        format!("Error: {}", error),
+                    );
+                }
+            }
 
             ui.add_space(16.0);
 
-            // Status message
-            ui.colored_label(
-                SignalColors::TEXT_SECONDARY,
-                "Waiting for phone to scan QR code...",
-            );
-
-            ui.add_space(40.0);
-
-            // Generate new QR button
-            if ui.button("Generate New QR Code").clicked() {
-                start_linking_process(app);
+            // Retry button (only show on error)
+            if matches!(app.linking_state(), LinkingState::Error(_)) {
+                if ui.button("Retry").clicked() {
+                    app.retry_linking();
+                }
             }
         });
     });
+}
 
-    // Start linking process if not already started
-    static LINKING_STARTED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+/// Draw a loading placeholder
+fn draw_loading_placeholder(ui: &egui::Ui, rect: Rect) {
+    let painter = ui.painter();
+    let center = rect.center();
 
-    if !LINKING_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
-        LINKING_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
-        start_linking_process(app);
+    // Draw spinning circles animation
+    let time = ui.input(|i| i.time);
+    let num_dots = 8;
+    let radius = 40.0;
+    let dot_radius = 6.0;
+
+    for i in 0..num_dots {
+        let angle = (i as f64 / num_dots as f64) * std::f64::consts::TAU + time * 2.0;
+        let x = center.x + (angle.cos() * radius) as f32;
+        let y = center.y + (angle.sin() * radius) as f32;
+
+        // Fade based on position in rotation
+        let alpha = ((i as f64 / num_dots as f64 + time.fract()) % 1.0) as f32;
+        let color = Color32::from_rgba_unmultiplied(
+            SignalColors::SIGNAL_BLUE.r(),
+            SignalColors::SIGNAL_BLUE.g(),
+            SignalColors::SIGNAL_BLUE.b(),
+            (alpha * 255.0) as u8,
+        );
+
+        painter.circle_filled(egui::pos2(x, y), dot_radius, color);
     }
 }
 
-/// Draw a placeholder QR code pattern
+/// Draw a placeholder QR code pattern (for visual testing)
 fn draw_placeholder_qr(ui: &egui::Ui, rect: Rect) {
     let painter = ui.painter();
-    let module_count = 29; // Standard QR code size
+    let module_count = 29;
     let module_size = (rect.width() - 20.0) / module_count as f32;
     let start = rect.min + Vec2::new(10.0, 10.0);
 
-    // Draw a pattern that looks like a QR code
     for row in 0..module_count {
         for col in 0..module_count {
-            // Draw finder patterns (corners)
             let is_finder = (row < 7 && col < 7)
                 || (row < 7 && col >= module_count - 7)
                 || (row >= module_count - 7 && col < 7);
 
-            // Draw timing patterns
             let is_timing = (row == 6 || col == 6) && !is_finder;
-
-            // Random data pattern for visual effect
             let is_data = !is_finder && !is_timing && ((row * col * 7) % 3 == 0);
 
             if is_finder || is_timing || is_data {
@@ -170,32 +196,29 @@ fn draw_placeholder_qr(ui: &egui::Ui, rect: Rect) {
     painter.circle_filled(center, logo_size / 2.0 - 4.0, SignalColors::SIGNAL_BLUE);
 }
 
-/// Start the device linking process
-fn start_linking_process(app: &mut SignalApp) {
-    let runtime = app.runtime().clone();
-    let storage = app.storage().clone();
+/// Draw error state
+fn draw_error_state(ui: &egui::Ui, rect: Rect) {
+    let painter = ui.painter();
+    let center = rect.center();
 
-    runtime.spawn(async move {
-        tracing::info!("Starting device linking process...");
-
-        // TODO: Implement actual linking with presage
-        // This will:
-        // 1. Generate provisioning URL
-        // 2. Create QR code from URL
-        // 3. Wait for phone to scan
-        // 4. Complete provisioning handshake
-        // 5. Store credentials
-
-        match SignalManager::link_device(&storage, "Signal Desktop").await {
-            Ok(manager) => {
-                tracing::info!("Device linked successfully!");
-                // Update app state - need to communicate back to main thread
-            }
-            Err(e) => {
-                tracing::error!("Failed to link device: {}", e);
-            }
-        }
-    });
+    // Draw X mark
+    painter.circle_filled(center, 50.0, Color32::from_rgb(255, 100, 100));
+    let stroke = egui::Stroke::new(6.0, Color32::WHITE);
+    let offset = 20.0;
+    painter.line_segment(
+        [
+            egui::pos2(center.x - offset, center.y - offset),
+            egui::pos2(center.x + offset, center.y + offset),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(center.x + offset, center.y - offset),
+            egui::pos2(center.x - offset, center.y + offset),
+        ],
+        stroke,
+    );
 }
 
 /// Render a QR code from data

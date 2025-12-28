@@ -1,3 +1,4 @@
+pub mod contacts;
 pub mod conversations;
 pub mod database;
 pub mod encryption;

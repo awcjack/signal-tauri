@@ -2,23 +2,23 @@
 
 pub mod chat_list;
 pub mod chat_view;
+pub mod encryption_setup;
 pub mod link_device;
 pub mod main_view;
 pub mod settings;
+pub mod unlock_database;
 
-/// Current view state
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewState {
-    /// Device linking screen (shown when no account exists)
+    EncryptionSetup,
     LinkDevice,
-    /// Main chat list view
+    UnlockDatabase,
     ChatList,
-    /// Settings view
     Settings,
 }
 
 impl Default for ViewState {
     fn default() -> Self {
-        Self::LinkDevice
+        Self::EncryptionSetup
     }
 }

@@ -340,10 +340,12 @@ mod tests {
     use crate::storage::database::Database;
     use tempfile::tempdir;
 
+    const TEST_KEY: &str = "test-passphrase-123";
+
     #[test]
     fn test_settings_default_on_empty_db() {
         let dir = tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let db = Database::open_encrypted(&dir.path().join("test.db"), TEST_KEY).unwrap();
         let repo = SettingsRepository::new(&db);
         
         assert_eq!(repo.get().theme, Theme::Dark);
@@ -357,7 +359,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         
         {
-            let db = Database::open(&db_path).unwrap();
+            let db = Database::open_encrypted(&db_path, TEST_KEY).unwrap();
             let mut repo = SettingsRepository::new(&db);
             repo.get_mut().theme = Theme::Light;
             repo.get_mut().language = "ja".to_string();
@@ -365,7 +367,7 @@ mod tests {
         }
         
         {
-            let db = Database::open(&db_path).unwrap();
+            let db = Database::open_encrypted(&db_path, TEST_KEY).unwrap();
             let repo = SettingsRepository::new(&db);
             assert_eq!(repo.get().theme, Theme::Light);
             assert_eq!(repo.get().language, "ja");
@@ -375,7 +377,7 @@ mod tests {
     #[test]
     fn test_settings_reset() {
         let dir = tempdir().unwrap();
-        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let db = Database::open_encrypted(&dir.path().join("test.db"), TEST_KEY).unwrap();
         let mut repo = SettingsRepository::new(&db);
         
         repo.get_mut().theme = Theme::Light;

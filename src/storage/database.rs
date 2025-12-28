@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -8,8 +8,9 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open_encrypted(path: &Path, passphrase: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        conn.pragma_update(None, "key", passphrase)?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -103,11 +104,13 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    const TEST_PASSPHRASE: &str = "test-encryption-key-12345";
+
     #[test]
     fn test_database_creation() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let db = Database::open(&db_path).unwrap();
+        let db = Database::open_encrypted(&db_path, TEST_PASSPHRASE).unwrap();
         assert!(db_path.exists());
     }
 
@@ -115,7 +118,7 @@ mod tests {
     fn test_tables_created() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let db = Database::open(&db_path).unwrap();
+        let db = Database::open_encrypted(&db_path, TEST_PASSPHRASE).unwrap();
         
         let conn = db.conn.lock().unwrap();
         let tables: Vec<String> = conn
@@ -130,5 +133,20 @@ mod tests {
         assert!(tables.contains(&"messages".to_string()));
         assert!(tables.contains(&"contacts".to_string()));
         assert!(tables.contains(&"settings".to_string()));
+    }
+
+    #[test]
+    fn test_encrypted_db_requires_correct_key() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("encrypted.db");
+        
+        {
+            let db = Database::open_encrypted(&db_path, TEST_PASSPHRASE).unwrap();
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO settings (key, value) VALUES ('test', 'data')", []).unwrap();
+        }
+        
+        let wrong_key_result = Database::open_encrypted(&db_path, "wrong-key");
+        assert!(wrong_key_result.is_err());
     }
 }

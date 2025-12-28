@@ -203,17 +203,20 @@ impl SignalApp {
         // Initialize storage
         let storage = Arc::new(Storage::new().expect("Failed to initialize storage"));
 
-        // Check if we have an existing account
         let has_account = storage.has_account();
+        let needs_password = storage.needs_password();
+        let encryption_configured = storage.is_encryption_configured();
 
-        // Determine initial view
-        let view_state = if has_account {
-            ViewState::ChatList
-        } else {
+        let view_state = if !encryption_configured {
+            ViewState::EncryptionSetup
+        } else if !has_account {
             ViewState::LinkDevice
+        } else if needs_password {
+            ViewState::UnlockDatabase
+        } else {
+            ViewState::ChatList
         };
 
-        // Create event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
@@ -231,8 +234,7 @@ impl SignalApp {
             selected_conversation_id: None,
         };
 
-        // If we have an account, initialize Signal manager
-        if has_account {
+        if has_account && !needs_password {
             app.initialize_signal_manager();
         }
 
@@ -313,8 +315,8 @@ impl SignalApp {
         };
 
         let message = incoming_to_message(incoming);
-        let message_repo = MessageRepository::new(db);
-        let conv_repo = ConversationRepository::new(db);
+        let message_repo = MessageRepository::new(&*db);
+        let conv_repo = ConversationRepository::new(&*db);
 
         let text_preview = match &incoming.content {
             MessageContent::Text(t) => t.clone(),
@@ -450,6 +452,22 @@ impl SignalApp {
     pub fn select_conversation(&mut self, id: Option<String>) {
         self.selected_conversation_id = id;
     }
+
+    pub fn on_database_unlocked(&mut self) {
+        self.view_state = ViewState::ChatList;
+        self.initialize_signal_manager();
+    }
+
+    pub fn on_encryption_setup_complete(&mut self) {
+        self.view_state = ViewState::LinkDevice;
+    }
+
+    pub fn on_data_cleared(&mut self) {
+        self.view_state = ViewState::EncryptionSetup;
+        self.linking_state = LinkingState::NotStarted;
+        self.initialized = false;
+        *self.signal_manager.write() = None;
+    }
 }
 
 impl eframe::App for SignalApp {
@@ -494,10 +512,15 @@ impl eframe::App for SignalApp {
                 });
             });
 
-        // Main content based on current view
         match &self.view_state {
+            ViewState::EncryptionSetup => {
+                crate::ui::views::encryption_setup::show(self, ctx);
+            }
             ViewState::LinkDevice => {
                 crate::ui::views::link_device::show(self, ctx);
+            }
+            ViewState::UnlockDatabase => {
+                crate::ui::views::unlock_database::show(self, ctx);
             }
             ViewState::ChatList => {
                 crate::ui::views::main_view::show(self, ctx);

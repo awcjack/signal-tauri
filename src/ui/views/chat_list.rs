@@ -111,13 +111,13 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
 
 fn load_conversations(app: &SignalApp) -> Vec<ConversationItem> {
     if let Some(db) = app.storage().database() {
-        let repo = ConversationRepository::new(db);
+        let repo = ConversationRepository::new(&*db);
         repo.list_active()
             .iter()
             .map(ConversationItem::from)
             .collect()
     } else {
-        get_placeholder_conversations()
+        Vec::new()
     }
 }
 
@@ -293,58 +293,4 @@ fn format_time(time: &DateTime<Utc>) -> String {
     } else {
         local.format("%d/%m/%y").to_string()
     }
-}
-
-/// Get placeholder conversations for UI demonstration
-fn get_placeholder_conversations() -> Vec<ConversationItem> {
-    vec![
-        ConversationItem {
-            id: "1".to_string(),
-            name: "Alice Smith".to_string(),
-            avatar_color: Color32::from_rgb(0x4C, 0xAF, 0x50),
-            last_message: Some("Hey! How are you doing?".to_string()),
-            last_message_time: Some(Utc::now()),
-            unread_count: 2,
-            is_group: false,
-            is_muted: false,
-            is_pinned: true,
-            typing_indicator: false,
-        },
-        ConversationItem {
-            id: "2".to_string(),
-            name: "Work Group".to_string(),
-            avatar_color: Color32::from_rgb(0x21, 0x96, 0xF3),
-            last_message: Some("Meeting at 3pm today".to_string()),
-            last_message_time: Some(Utc::now() - chrono::Duration::hours(2)),
-            unread_count: 0,
-            is_group: true,
-            is_muted: true,
-            is_pinned: false,
-            typing_indicator: false,
-        },
-        ConversationItem {
-            id: "3".to_string(),
-            name: "Bob Johnson".to_string(),
-            avatar_color: Color32::from_rgb(0xFF, 0x98, 0x00),
-            last_message: Some("Thanks for the help!".to_string()),
-            last_message_time: Some(Utc::now() - chrono::Duration::days(1)),
-            unread_count: 0,
-            is_group: false,
-            is_muted: false,
-            is_pinned: false,
-            typing_indicator: true,
-        },
-        ConversationItem {
-            id: "4".to_string(),
-            name: "Family".to_string(),
-            avatar_color: Color32::from_rgb(0xE9, 0x1E, 0x63),
-            last_message: Some("See you at dinner!".to_string()),
-            last_message_time: Some(Utc::now() - chrono::Duration::days(2)),
-            unread_count: 5,
-            is_group: true,
-            is_muted: false,
-            is_pinned: false,
-            typing_indicator: false,
-        },
-    ]
 }

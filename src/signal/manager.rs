@@ -4,11 +4,13 @@ use crate::signal::SignalError;
 use crate::storage::Storage;
 use futures::channel::oneshot;
 use futures::StreamExt;
+use parking_lot::Mutex;
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::prelude::Content;
 use presage::libsignal_service::protocol::ServiceId;
 use presage::libsignal_service::proto::DataMessage;
 use presage::model::messages::Received;
+use presage::manager::Registered;
 use presage::Manager;
 use presage_store_sqlite::{OnNewIdentity, SqliteStore};
 use std::sync::Arc;
@@ -16,6 +18,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use url::Url;
 use uuid::Uuid;
+
+pub enum SendCommand {
+    DirectMessage {
+        recipient: Uuid,
+        text: String,
+        reply: oneshot::Sender<Result<(), SignalError>>,
+    },
+    GroupMessage {
+        group_key: Vec<u8>,
+        text: String,
+        reply: oneshot::Sender<Result<(), SignalError>>,
+    },
+}
+
+static SEND_TX: Mutex<Option<mpsc::UnboundedSender<SendCommand>>> = Mutex::new(None);
 
 /// Events emitted by the Signal manager
 #[derive(Debug, Clone)]
@@ -213,16 +230,8 @@ impl SignalManager {
         let phone_number = reg_data.phone_number.to_string();
         let device_id = reg_data.device_id.unwrap_or(1);
 
-        let config = serde_json::json!({
-            "phone_number": phone_number,
-            "device_id": device_id,
-        });
-
-        let config_path = storage.data_dir().join("config.json");
-        if let Err(e) = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default()) {
-            tracing::error!("Failed to save config: {}", e);
-        } else {
-            tracing::info!("Account saved for: {}", phone_number);
+        if let Err(e) = storage.save_account(&phone_number, device_id) {
+            tracing::error!("Failed to save account: {}", e);
         }
 
         tracing::info!("Device linked successfully!");
@@ -339,6 +348,13 @@ impl SignalManager {
         storage: Arc<Storage>,
         event_tx: mpsc::UnboundedSender<SignalEvent>,
     ) {
+        let (send_tx, send_rx) = mpsc::unbounded_channel::<SendCommand>();
+        
+        {
+            let mut guard = SEND_TX.lock();
+            *guard = Some(send_tx);
+        }
+        
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -346,11 +362,14 @@ impl SignalManager {
                 .expect("Failed to create runtime for receiving");
 
             rt.block_on(async move {
-                if let Err(e) = Self::receive_loop(&storage, event_tx.clone()).await {
+                if let Err(e) = Self::receive_loop(&storage, event_tx.clone(), send_rx).await {
                     tracing::error!("Message receive loop failed: {}", e);
                     let _ = event_tx.send(SignalEvent::Error(e.to_string()));
                     let _ = event_tx.send(SignalEvent::ConnectionStateChanged(ConnectionState::Disconnected));
                 }
+                
+                let mut guard = SEND_TX.lock();
+                *guard = None;
             });
         });
     }
@@ -358,6 +377,7 @@ impl SignalManager {
     async fn receive_loop(
         storage: &Arc<Storage>,
         event_tx: mpsc::UnboundedSender<SignalEvent>,
+        mut send_rx: mpsc::UnboundedReceiver<SendCommand>,
     ) -> Result<(), SignalError> {
         let db_path = storage.signal_db_path();
         let db_url = format!("sqlite://{}", db_path.display());
@@ -387,27 +407,100 @@ impl SignalManager {
 
         futures::pin_mut!(messages);
 
-        while let Some(received) = messages.next().await {
-            match received {
-                Received::QueueEmpty => {
-                    tracing::info!("Message queue synchronized");
-                    let _ = event_tx.send(SignalEvent::SyncCompleted);
+        loop {
+            tokio::select! {
+                received = messages.next() => {
+                    match received {
+                        Some(Received::QueueEmpty) => {
+                            tracing::info!("Message queue synchronized");
+                            let _ = event_tx.send(SignalEvent::SyncCompleted);
+                        }
+                        Some(Received::Contacts) => {
+                            tracing::info!("Contacts synchronized");
+                        }
+                        Some(Received::Content(content)) => {
+                            if let Some(incoming) = Self::process_content(&content) {
+                                tracing::info!("Received message from {}", incoming.sender);
+                                let _ = event_tx.send(SignalEvent::MessageReceived(incoming));
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Message stream ended");
+                            break;
+                        }
+                    }
                 }
-                Received::Contacts => {
-                    tracing::info!("Contacts synchronized");
-                }
-                Received::Content(content) => {
-                    if let Some(incoming) = Self::process_content(&content) {
-                        tracing::info!("Received message from {}", incoming.sender);
-                        let _ = event_tx.send(SignalEvent::MessageReceived(incoming));
+                cmd = send_rx.recv() => {
+                    match cmd {
+                        Some(SendCommand::DirectMessage { recipient, text, reply }) => {
+                            let result = Self::send_dm_with_manager(&mut manager, recipient, &text).await;
+                            let _ = reply.send(result);
+                        }
+                        Some(SendCommand::GroupMessage { group_key, text, reply }) => {
+                            let result = Self::send_group_with_manager(&mut manager, &group_key, &text).await;
+                            let _ = reply.send(result);
+                        }
+                        None => {
+                            tracing::info!("Send channel closed");
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        tracing::warn!("Message stream ended");
         let _ = event_tx.send(SignalEvent::ConnectionStateChanged(ConnectionState::Disconnected));
 
+        Ok(())
+    }
+    
+    async fn send_dm_with_manager(
+        manager: &mut Manager<SqliteStore, Registered>,
+        recipient: Uuid,
+        text: &str,
+    ) -> Result<(), SignalError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| SignalError::SendFailed(e.to_string()))?
+            .as_millis() as u64;
+        
+        let data_message = DataMessage {
+            body: Some(text.to_string()),
+            timestamp: Some(timestamp),
+            ..Default::default()
+        };
+        
+        let service_id = ServiceId::Aci(recipient.into());
+        
+        manager
+            .send_message(service_id, data_message, timestamp)
+            .await
+            .map_err(|e| SignalError::SendFailed(format!("{:?}", e)))?;
+        
+        Ok(())
+    }
+    
+    async fn send_group_with_manager(
+        manager: &mut Manager<SqliteStore, Registered>,
+        master_key: &[u8],
+        text: &str,
+    ) -> Result<(), SignalError> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| SignalError::SendFailed(e.to_string()))?
+            .as_millis() as u64;
+        
+        let data_message = DataMessage {
+            body: Some(text.to_string()),
+            timestamp: Some(timestamp),
+            ..Default::default()
+        };
+        
+        manager
+            .send_message_to_group(master_key, data_message, timestamp)
+            .await
+            .map_err(|e| SignalError::SendFailed(format!("{:?}", e)))?;
+        
         Ok(())
     }
 
@@ -481,7 +574,6 @@ impl SignalManager {
         let recipient_uuid = Uuid::parse_str(recipient)
             .map_err(|e| SignalError::SendFailed(format!("Invalid recipient UUID: {}", e)))?;
         
-        let storage = self.storage.clone();
         let event_tx = self.event_tx.clone();
         let text = text.to_string();
         let msg_id = message_id.clone();
@@ -493,7 +585,11 @@ impl SignalManager {
                 .expect("Failed to create runtime for sending");
             
             rt.block_on(async move {
-                match Self::do_send_message(&storage, recipient_uuid, &text).await {
+                match Self::send_via_channel(SendCommand::DirectMessage {
+                    recipient: recipient_uuid,
+                    text,
+                    reply: oneshot::channel().0,
+                }).await {
                     Ok(()) => {
                         tracing::info!("Message {} sent successfully", msg_id);
                         let _ = event_tx.send(SignalEvent::MessageSent { message_id: msg_id });
@@ -508,48 +604,6 @@ impl SignalManager {
         
         Ok(message_id)
     }
-    
-    async fn do_send_message(
-        storage: &Arc<Storage>,
-        recipient: Uuid,
-        text: &str,
-    ) -> Result<(), SignalError> {
-        let db_path = storage.signal_db_path();
-        let db_url = format!("sqlite://{}", db_path.display());
-        let passphrase = storage.get_encryption_key();
-        
-        let store = SqliteStore::open_with_passphrase(
-            &db_url,
-            passphrase.as_deref(),
-            OnNewIdentity::Trust,
-        )
-        .await
-        .map_err(|e| SignalError::StorageError(e.to_string()))?;
-        
-        let mut manager = Manager::load_registered(store)
-            .await
-            .map_err(|_| SignalError::NotRegistered)?;
-        
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| SignalError::SendFailed(e.to_string()))?
-            .as_millis() as u64;
-        
-        let data_message = DataMessage {
-            body: Some(text.to_string()),
-            timestamp: Some(timestamp),
-            ..Default::default()
-        };
-        
-        let service_id = ServiceId::Aci(recipient.into());
-        
-        manager
-            .send_message(service_id, data_message, timestamp)
-            .await
-            .map_err(|e| SignalError::SendFailed(format!("{:?}", e)))?;
-        
-        Ok(())
-    }
 
     pub async fn send_group_message(
         &self,
@@ -563,7 +617,6 @@ impl SignalManager {
             group_id,
         ).map_err(|e| SignalError::SendFailed(format!("Invalid group ID: {}", e)))?;
         
-        let storage = self.storage.clone();
         let event_tx = self.event_tx.clone();
         let text = text.to_string();
         let msg_id = message_id.clone();
@@ -575,7 +628,11 @@ impl SignalManager {
                 .expect("Failed to create runtime for sending");
             
             rt.block_on(async move {
-                match Self::do_send_group_message(&storage, &master_key, &text).await {
+                match Self::send_via_channel(SendCommand::GroupMessage {
+                    group_key: master_key,
+                    text,
+                    reply: oneshot::channel().0,
+                }).await {
                     Ok(()) => {
                         tracing::info!("Group message {} sent successfully", msg_id);
                         let _ = event_tx.send(SignalEvent::MessageSent { message_id: msg_id });
@@ -589,46 +646,6 @@ impl SignalManager {
         });
         
         Ok(message_id)
-    }
-    
-    async fn do_send_group_message(
-        storage: &Arc<Storage>,
-        master_key: &[u8],
-        text: &str,
-    ) -> Result<(), SignalError> {
-        let db_path = storage.signal_db_path();
-        let db_url = format!("sqlite://{}", db_path.display());
-        let passphrase = storage.get_encryption_key();
-        
-        let store = SqliteStore::open_with_passphrase(
-            &db_url,
-            passphrase.as_deref(),
-            OnNewIdentity::Trust,
-        )
-        .await
-        .map_err(|e| SignalError::StorageError(e.to_string()))?;
-        
-        let mut manager = Manager::load_registered(store)
-            .await
-            .map_err(|_| SignalError::NotRegistered)?;
-        
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| SignalError::SendFailed(e.to_string()))?
-            .as_millis() as u64;
-        
-        let data_message = DataMessage {
-            body: Some(text.to_string()),
-            timestamp: Some(timestamp),
-            ..Default::default()
-        };
-        
-        manager
-            .send_message_to_group(master_key, data_message, timestamp)
-            .await
-            .map_err(|e| SignalError::SendFailed(format!("{:?}", e)))?;
-        
-        Ok(())
     }
 
     /// Send a reaction
@@ -670,17 +687,22 @@ impl SignalManager {
     }
     
     pub async fn send_message_static(
-        storage: &Arc<Storage>,
+        _storage: &Arc<Storage>,
         recipient: &str,
         text: &str,
     ) -> Result<(), SignalError> {
         let recipient_uuid = Uuid::parse_str(recipient)
             .map_err(|e| SignalError::SendFailed(format!("Invalid recipient UUID: {}", e)))?;
-        Self::do_send_message(storage, recipient_uuid, text).await
+        
+        Self::send_via_channel(SendCommand::DirectMessage {
+            recipient: recipient_uuid,
+            text: text.to_string(),
+            reply: oneshot::channel().0,
+        }).await
     }
     
     pub async fn send_group_message_static(
-        storage: &Arc<Storage>,
+        _storage: &Arc<Storage>,
         group_id: &str,
         text: &str,
     ) -> Result<(), SignalError> {
@@ -688,6 +710,37 @@ impl SignalManager {
             &base64::engine::general_purpose::STANDARD,
             group_id,
         ).map_err(|e| SignalError::SendFailed(format!("Invalid group ID: {}", e)))?;
-        Self::do_send_group_message(storage, &master_key, text).await
+        
+        Self::send_via_channel(SendCommand::GroupMessage {
+            group_key: master_key,
+            text: text.to_string(),
+            reply: oneshot::channel().0,
+        }).await
+    }
+    
+    async fn send_via_channel(mut cmd: SendCommand) -> Result<(), SignalError> {
+        let (tx, rx) = oneshot::channel();
+        
+        match &mut cmd {
+            SendCommand::DirectMessage { reply, .. } => *reply = tx,
+            SendCommand::GroupMessage { reply, .. } => *reply = tx,
+        }
+        
+        let send_tx = {
+            let guard = SEND_TX.lock();
+            guard.clone()
+        };
+        
+        let send_tx = send_tx.ok_or_else(|| {
+            SignalError::SendFailed("Not connected - receive loop not running".to_string())
+        })?;
+        
+        send_tx.send(cmd).map_err(|_| {
+            SignalError::SendFailed("Send channel closed".to_string())
+        })?;
+        
+        rx.await.map_err(|_| {
+            SignalError::SendFailed("Response channel closed".to_string())
+        })?
     }
 }

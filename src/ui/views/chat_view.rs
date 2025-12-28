@@ -205,8 +205,8 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
 
 fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Vec<MessageItem>) {
     if let Some(db) = app.storage().database() {
-        let conv_repo = ConversationRepository::new(db);
-        let msg_repo = MessageRepository::new(db);
+        let conv_repo = ConversationRepository::new(&*db);
+        let msg_repo = MessageRepository::new(&*db);
 
         let name = conv_repo
             .get(conversation_id)
@@ -551,13 +551,13 @@ fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
         expires_at: None,
     };
 
-    let msg_repo = MessageRepository::new(db);
+    let msg_repo = MessageRepository::new(&*db);
     if let Err(e) = msg_repo.save(&message) {
         tracing::error!("Failed to save outgoing message: {}", e);
         return;
     }
 
-    let conv_repo = ConversationRepository::new(db);
+    let conv_repo = ConversationRepository::new(&*db);
     if let Some(mut conv) = conv_repo.get(conversation_id) {
         conv.update_last_message(text, message.sent_at);
         let _ = conv_repo.save(&conv);

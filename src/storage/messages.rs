@@ -459,10 +459,12 @@ mod tests {
     use super::*;
     use tempfile::{tempdir, TempDir};
 
+    const TEST_KEY: &str = "test-passphrase-123";
+
     fn create_test_db() -> (Database, TempDir) {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let db = Database::open(&db_path).unwrap();
+        let db = Database::open_encrypted(&db_path, TEST_KEY).unwrap();
         (db, dir)
     }
 

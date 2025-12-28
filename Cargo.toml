@@ -53,15 +53,36 @@ rodio = "0.19"
 # HTTP client for attachments
 # Use rustls to avoid macOS SecureTransport certificate issues
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest-websocket = "0.4"
+
+# Protocol buffers for Signal protocol
+prost = "0.13"
+bytes = "1"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+ctr = "0.9"
 
 # URL handling
 url = "2"
+urlencoding = "2"
 
 # Base64 encoding
 base64 = "0.22"
 
+# Compression
+flate2 = "1"
+
+# Hex encoding
+hex = "0.4"
+
 # Clipboard
 arboard = "3"
+
+# Random number generation
+rand = "0.9"
 
 # Additional utilities
 hostname = "0.4"

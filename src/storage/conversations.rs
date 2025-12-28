@@ -1,73 +1,54 @@
-//! Conversation storage
-
-use chrono::{DateTime, Utc};
+use crate::storage::database::Database;
+use chrono::{DateTime, TimeZone, Utc};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
-/// Conversation type
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ConversationType {
-    /// 1:1 private conversation
     Private,
-    /// Group conversation
     Group,
-    /// Note to self
     NoteToSelf,
 }
 
-/// A conversation (thread)
+impl ConversationType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Group => "group",
+            Self::NoteToSelf => "note_to_self",
+        }
+    }
+
+    fn from_str(s: &str) -> Self {
+        match s {
+            "group" => Self::Group,
+            "note_to_self" => Self::NoteToSelf,
+            _ => Self::Private,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
-    /// Unique conversation ID (UUID for private, group ID for groups)
     pub id: String,
-
-    /// Conversation type
     pub conversation_type: ConversationType,
-
-    /// Display name
     pub name: String,
-
-    /// Avatar path (if custom)
     pub avatar_path: Option<String>,
-
-    /// Last message preview
     pub last_message: Option<String>,
-
-    /// Last message timestamp
     pub last_message_at: Option<DateTime<Utc>>,
-
-    /// Unread message count
     pub unread_count: u32,
-
-    /// Whether the conversation is pinned
     pub is_pinned: bool,
-
-    /// Whether notifications are muted
     pub is_muted: bool,
-
-    /// Mute expiration time (None = muted forever)
     pub muted_until: Option<DateTime<Utc>>,
-
-    /// Whether the conversation is archived
     pub is_archived: bool,
-
-    /// Whether the conversation is blocked
     pub is_blocked: bool,
-
-    /// Disappearing messages timer (0 = disabled)
     pub disappearing_messages_timer: u32,
-
-    /// Draft message (if any)
     pub draft: Option<String>,
-
-    /// When the conversation was created
     pub created_at: DateTime<Utc>,
-
-    /// Last update timestamp
     pub updated_at: DateTime<Utc>,
 }
 
 impl Conversation {
-    /// Create a new private conversation
     pub fn new_private(id: &str, name: &str) -> Self {
         let now = Utc::now();
         Self {
@@ -90,7 +71,6 @@ impl Conversation {
         }
     }
 
-    /// Create a new group conversation
     pub fn new_group(id: &str, name: &str) -> Self {
         let now = Utc::now();
         Self {
@@ -113,19 +93,16 @@ impl Conversation {
         }
     }
 
-    /// Check if notifications are currently muted
     pub fn is_currently_muted(&self) -> bool {
         if !self.is_muted {
             return false;
         }
-
         match self.muted_until {
-            None => true, // Muted forever
+            None => true,
             Some(until) => Utc::now() < until,
         }
     }
 
-    /// Get initials for avatar
     pub fn initials(&self) -> String {
         self.name
             .split_whitespace()
@@ -135,88 +112,158 @@ impl Conversation {
             .to_uppercase()
     }
 
-    /// Update last message
     pub fn update_last_message(&mut self, message: &str, timestamp: DateTime<Utc>) {
         self.last_message = Some(message.to_string());
         self.last_message_at = Some(timestamp);
         self.updated_at = Utc::now();
     }
 
-    /// Increment unread count
     pub fn increment_unread(&mut self) {
         self.unread_count += 1;
         self.updated_at = Utc::now();
     }
 
-    /// Mark as read
     pub fn mark_read(&mut self) {
         self.unread_count = 0;
         self.updated_at = Utc::now();
     }
 }
 
-/// Conversation repository
-pub struct ConversationRepository {
-    // TODO: Add database connection
+pub struct ConversationRepository<'a> {
+    db: &'a Database,
 }
 
-impl ConversationRepository {
-    /// Create a new repository
-    pub fn new() -> Self {
-        Self {}
+impl<'a> ConversationRepository<'a> {
+    pub fn new(db: &'a Database) -> Self {
+        Self { db }
     }
 
-    /// Get a conversation by ID
-    pub async fn get(&self, id: &str) -> Option<Conversation> {
-        // TODO: Implement database lookup
-        None
+    pub fn get(&self, id: &str) -> Option<Conversation> {
+        let conn = self.db.connection();
+        let conn = conn.lock().unwrap();
+        
+        conn.query_row(
+            "SELECT id, conversation_type, name, avatar_path, last_message, 
+                    last_message_at, unread_count, is_pinned, is_muted, muted_until,
+                    is_archived, is_blocked, disappearing_timer, draft, created_at, updated_at
+             FROM conversations WHERE id = ?",
+            params![id],
+            |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    conversation_type: ConversationType::from_str(&row.get::<_, String>(1)?),
+                    name: row.get(2)?,
+                    avatar_path: row.get(3)?,
+                    last_message: row.get(4)?,
+                    last_message_at: row.get::<_, Option<i64>>(5)?.map(|t| Utc.timestamp_opt(t, 0).unwrap()),
+                    unread_count: row.get::<_, i64>(6)? as u32,
+                    is_pinned: row.get::<_, i64>(7)? != 0,
+                    is_muted: row.get::<_, i64>(8)? != 0,
+                    muted_until: row.get::<_, Option<i64>>(9)?.map(|t| Utc.timestamp_opt(t, 0).unwrap()),
+                    is_archived: row.get::<_, i64>(10)? != 0,
+                    is_blocked: row.get::<_, i64>(11)? != 0,
+                    disappearing_messages_timer: row.get::<_, i64>(12)? as u32,
+                    draft: row.get(13)?,
+                    created_at: Utc.timestamp_opt(row.get::<_, i64>(14)?, 0).unwrap(),
+                    updated_at: Utc.timestamp_opt(row.get::<_, i64>(15)?, 0).unwrap(),
+                })
+            },
+        ).ok()
     }
 
-    /// Save a conversation
-    pub async fn save(&self, conversation: &Conversation) -> anyhow::Result<()> {
-        // TODO: Implement database save
+    pub fn save(&self, conv: &Conversation) -> anyhow::Result<()> {
+        let conn = self.db.connection();
+        let conn = conn.lock().unwrap();
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO conversations 
+             (id, conversation_type, name, avatar_path, last_message, last_message_at,
+              unread_count, is_pinned, is_muted, muted_until, is_archived, is_blocked,
+              disappearing_timer, draft, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                conv.id,
+                conv.conversation_type.as_str(),
+                conv.name,
+                conv.avatar_path,
+                conv.last_message,
+                conv.last_message_at.map(|t| t.timestamp()),
+                conv.unread_count as i64,
+                conv.is_pinned as i64,
+                conv.is_muted as i64,
+                conv.muted_until.map(|t| t.timestamp()),
+                conv.is_archived as i64,
+                conv.is_blocked as i64,
+                conv.disappearing_messages_timer as i64,
+                conv.draft,
+                conv.created_at.timestamp(),
+                conv.updated_at.timestamp(),
+            ],
+        )?;
         Ok(())
     }
 
-    /// Get all conversations
-    pub async fn list(&self) -> Vec<Conversation> {
-        // TODO: Implement database list
-        Vec::new()
+    pub fn list(&self) -> Vec<Conversation> {
+        let conn = self.db.connection();
+        let conn = conn.lock().unwrap();
+        
+        let mut stmt = match conn.prepare(
+            "SELECT id, conversation_type, name, avatar_path, last_message, 
+                    last_message_at, unread_count, is_pinned, is_muted, muted_until,
+                    is_archived, is_blocked, disappearing_timer, draft, created_at, updated_at
+             FROM conversations 
+             ORDER BY is_pinned DESC, updated_at DESC"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        stmt.query_map([], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                conversation_type: ConversationType::from_str(&row.get::<_, String>(1)?),
+                name: row.get(2)?,
+                avatar_path: row.get(3)?,
+                last_message: row.get(4)?,
+                last_message_at: row.get::<_, Option<i64>>(5)?.map(|t| Utc.timestamp_opt(t, 0).unwrap()),
+                unread_count: row.get::<_, i64>(6)? as u32,
+                is_pinned: row.get::<_, i64>(7)? != 0,
+                is_muted: row.get::<_, i64>(8)? != 0,
+                muted_until: row.get::<_, Option<i64>>(9)?.map(|t| Utc.timestamp_opt(t, 0).unwrap()),
+                is_archived: row.get::<_, i64>(10)? != 0,
+                is_blocked: row.get::<_, i64>(11)? != 0,
+                disappearing_messages_timer: row.get::<_, i64>(12)? as u32,
+                draft: row.get(13)?,
+                created_at: Utc.timestamp_opt(row.get::<_, i64>(14)?, 0).unwrap(),
+                updated_at: Utc.timestamp_opt(row.get::<_, i64>(15)?, 0).unwrap(),
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
-    /// Get active conversations (not archived)
-    pub async fn list_active(&self) -> Vec<Conversation> {
-        // TODO: Implement database list with filter
-        Vec::new()
+    pub fn list_active(&self) -> Vec<Conversation> {
+        self.list().into_iter().filter(|c| !c.is_archived).collect()
     }
 
-    /// Get archived conversations
-    pub async fn list_archived(&self) -> Vec<Conversation> {
-        // TODO: Implement database list with filter
-        Vec::new()
+    pub fn list_archived(&self) -> Vec<Conversation> {
+        self.list().into_iter().filter(|c| c.is_archived).collect()
     }
 
-    /// Get pinned conversations
-    pub async fn list_pinned(&self) -> Vec<Conversation> {
-        // TODO: Implement database list with filter
-        Vec::new()
-    }
-
-    /// Search conversations by name
-    pub async fn search(&self, query: &str) -> Vec<Conversation> {
-        // TODO: Implement search
-        Vec::new()
-    }
-
-    /// Delete a conversation and all its messages
-    pub async fn delete(&self, id: &str) -> anyhow::Result<()> {
-        // TODO: Implement delete
+    pub fn delete(&self, id: &str) -> anyhow::Result<()> {
+        let conn = self.db.connection();
+        let conn = conn.lock().unwrap();
+        conn.execute("DELETE FROM conversations WHERE id = ?", params![id])?;
         Ok(())
     }
-}
 
-impl Default for ConversationRepository {
-    fn default() -> Self {
-        Self::new()
+    pub fn update_unread(&self, id: &str, count: u32) -> anyhow::Result<()> {
+        let conn = self.db.connection();
+        let conn = conn.lock().unwrap();
+        conn.execute(
+            "UPDATE conversations SET unread_count = ?, updated_at = ? WHERE id = ?",
+            params![count as i64, Utc::now().timestamp(), id],
+        )?;
+        Ok(())
     }
 }

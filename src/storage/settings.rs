@@ -1,7 +1,13 @@
 //! Application settings storage
 
+use crate::storage::database::Database;
+use anyhow::Result;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+const SETTINGS_KEY: &str = "app_settings";
 
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,51 +287,102 @@ impl Default for WindowSettings {
     }
 }
 
-/// Settings repository
 pub struct SettingsRepository {
-    settings_path: PathBuf,
+    conn: Arc<Mutex<rusqlite::Connection>>,
     settings: Settings,
 }
 
 impl SettingsRepository {
-    /// Create a new settings repository
-    pub fn new(data_dir: &PathBuf) -> Self {
-        let settings_path = data_dir.join("settings.json");
-
-        let settings = if settings_path.exists() {
-            std::fs::read_to_string(&settings_path)
-                .ok()
-                .and_then(|content| serde_json::from_str(&content).ok())
-                .unwrap_or_default()
-        } else {
-            Settings::default()
-        };
-
-        Self {
-            settings_path,
-            settings,
-        }
+    pub fn new(database: &Database) -> Self {
+        let conn = database.connection();
+        let settings = Self::load_from_db(&conn).unwrap_or_default();
+        Self { conn, settings }
     }
 
-    /// Get current settings
+    fn load_from_db(conn: &Arc<Mutex<rusqlite::Connection>>) -> Option<Settings> {
+        let conn = conn.lock().ok()?;
+        let json: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![SETTINGS_KEY],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
     pub fn get(&self) -> &Settings {
         &self.settings
     }
 
-    /// Get mutable settings
     pub fn get_mut(&mut self) -> &mut Settings {
         &mut self.settings
     }
 
-    /// Save settings
-    pub fn save(&self) -> anyhow::Result<()> {
-        let content = serde_json::to_string_pretty(&self.settings)?;
-        std::fs::write(&self.settings_path, content)?;
+    pub fn save(&self) -> Result<()> {
+        let json = serde_json::to_string(&self.settings)?;
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![SETTINGS_KEY, json],
+        )?;
         Ok(())
     }
 
-    /// Reset to defaults
     pub fn reset(&mut self) {
         self.settings = Settings::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::database::Database;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_settings_default_on_empty_db() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let repo = SettingsRepository::new(&db);
+        
+        assert_eq!(repo.get().theme, Theme::Dark);
+        assert_eq!(repo.get().language, "en");
+        assert!(repo.get().typing_indicators);
+    }
+
+    #[test]
+    fn test_settings_save_and_load() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        
+        {
+            let db = Database::open(&db_path).unwrap();
+            let mut repo = SettingsRepository::new(&db);
+            repo.get_mut().theme = Theme::Light;
+            repo.get_mut().language = "ja".to_string();
+            repo.save().unwrap();
+        }
+        
+        {
+            let db = Database::open(&db_path).unwrap();
+            let repo = SettingsRepository::new(&db);
+            assert_eq!(repo.get().theme, Theme::Light);
+            assert_eq!(repo.get().language, "ja");
+        }
+    }
+
+    #[test]
+    fn test_settings_reset() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(&dir.path().join("test.db")).unwrap();
+        let mut repo = SettingsRepository::new(&db);
+        
+        repo.get_mut().theme = Theme::Light;
+        repo.get_mut().language = "de".to_string();
+        repo.reset();
+        
+        assert_eq!(repo.get().theme, Theme::Dark);
+        assert_eq!(repo.get().language, "en");
     }
 }

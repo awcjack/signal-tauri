@@ -1,35 +1,24 @@
 //! Storage module - encrypted local database
 
 pub mod conversations;
+pub mod database;
 pub mod messages;
 pub mod settings;
 
 use anyhow::Result;
+use database::Database;
 use directories::ProjectDirs;
 use std::path::PathBuf;
 
-/// Main storage interface
 pub struct Storage {
-    /// Base directory for all data
     data_dir: PathBuf,
-
-    /// Path to the database file
     db_path: PathBuf,
-
-    /// Path to attachments directory
     attachments_dir: PathBuf,
-
-    /// Path to avatars directory
     avatars_dir: PathBuf,
-
-    /// Whether an account is registered
     has_account: bool,
-
-    /// Phone number (if registered)
     phone_number: Option<String>,
-
-    /// Device ID (if registered)
     device_id: Option<u32>,
+    database: Option<Database>,
 }
 
 impl Storage {
@@ -77,6 +66,11 @@ impl Storage {
             (false, None, None)
         };
 
+        let database = Database::open(&db_path).ok();
+        if database.is_some() {
+            tracing::info!("App database initialized at: {:?}", db_path);
+        }
+
         Ok(Self {
             data_dir,
             db_path,
@@ -85,25 +79,26 @@ impl Storage {
             has_account,
             phone_number,
             device_id,
+            database,
         })
     }
 
-    /// Check if an account exists
     pub fn has_account(&self) -> bool {
         self.has_account
     }
 
-    /// Get phone number
     pub fn get_phone_number(&self) -> Option<String> {
         self.phone_number.clone()
     }
 
-    /// Get device ID
     pub fn get_device_id(&self) -> Option<u32> {
         self.device_id
     }
 
-    /// Get data directory path
+    pub fn database(&self) -> Option<&Database> {
+        self.database.as_ref()
+    }
+
     pub fn data_dir(&self) -> &PathBuf {
         &self.data_dir
     }

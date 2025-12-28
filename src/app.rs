@@ -1,8 +1,13 @@
 //! Main application state and logic
 
+use crate::signal::manager::{IncomingMessage, MessageContent};
+use crate::signal::messages::{Content, Message, MessageDirection, MessageStatus};
 use crate::signal::{ConnectionState as SignalConnectionState, SignalEvent, SignalManager};
+use crate::storage::conversations::{Conversation, ConversationRepository};
+use crate::storage::messages::MessageRepository;
 use crate::storage::Storage;
 use crate::ui::{theme::SignalTheme, views::ViewState};
+use chrono::{TimeZone, Utc};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -52,40 +57,19 @@ impl Default for LinkingState {
     }
 }
 
-/// Main application state
 pub struct SignalApp {
-    /// Async runtime for background tasks
     runtime: Arc<Runtime>,
-
-    /// Signal protocol manager
     signal_manager: Arc<RwLock<Option<SignalManager>>>,
-
-    /// Local storage
     storage: Arc<Storage>,
-
-    /// Current view state
     view_state: ViewState,
-
-    /// Theme configuration
     theme: SignalTheme,
-
-    /// Connection status
     connection_status: ConnectionStatus,
-
-    /// Error message to display
     error_message: Option<String>,
-
-    /// Whether the app is initialized
     initialized: bool,
-
-    /// Device linking state
     linking_state: LinkingState,
-
-    /// Event receiver for Signal events
     event_rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<SignalEvent>>>>,
-
-    /// Event sender for Signal events (shared with SignalManager)
     event_tx: mpsc::UnboundedSender<SignalEvent>,
+    selected_conversation_id: Option<String>,
 }
 
 /// Connection status to Signal servers
@@ -112,6 +96,93 @@ fn get_device_name() -> String {
         .unwrap_or_else(|| "Desktop".to_string());
 
     format!("Signal Desktop ({})", hostname)
+}
+
+fn incoming_to_message(incoming: &IncomingMessage) -> Message {
+    let content = match &incoming.content {
+        MessageContent::Text(text) => Content::Text {
+            body: text.clone(),
+            mentions: Vec::new(),
+        },
+        MessageContent::Attachment { content_type, filename, size, attachment_id } => {
+            if content_type.starts_with("image/") {
+                Content::Image {
+                    attachment_id: attachment_id.clone(),
+                    content_type: content_type.clone(),
+                    width: 0,
+                    height: 0,
+                    size: *size,
+                    caption: None,
+                    blurhash: None,
+                }
+            } else if content_type.starts_with("video/") {
+                Content::Video {
+                    attachment_id: attachment_id.clone(),
+                    content_type: content_type.clone(),
+                    width: 0,
+                    height: 0,
+                    duration_ms: 0,
+                    size: *size,
+                    caption: None,
+                    thumbnail_id: None,
+                }
+            } else if content_type.starts_with("audio/") {
+                Content::Audio {
+                    attachment_id: attachment_id.clone(),
+                    content_type: content_type.clone(),
+                    duration_ms: 0,
+                    size: *size,
+                    waveform: None,
+                }
+            } else {
+                Content::File {
+                    attachment_id: attachment_id.clone(),
+                    content_type: content_type.clone(),
+                    filename: filename.clone().unwrap_or_else(|| "attachment".to_string()),
+                    size: *size,
+                }
+            }
+        }
+        MessageContent::Sticker { pack_id, sticker_id } => Content::Sticker {
+            pack_id: pack_id.clone(),
+            pack_key: String::new(),
+            sticker_id: *sticker_id,
+            emoji: None,
+        },
+        MessageContent::Reaction { emoji, target_message_id: _, remove: _ } => {
+            // Reactions are usually handled separately, but store as text for now
+            Content::Text {
+                body: format!("Reacted with {} to message", emoji),
+                mentions: Vec::new(),
+            }
+        }
+        MessageContent::Quote { quoted_message_id: _, text } => Content::Text {
+            body: text.clone(),
+            mentions: Vec::new(),
+        },
+    };
+
+    let sent_at = Utc.timestamp_opt(incoming.timestamp / 1000, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
+    let server_timestamp = Utc.timestamp_opt(incoming.server_timestamp / 1000, 0).single();
+
+    Message {
+        id: incoming.id.clone(),
+        conversation_id: incoming.conversation_id.clone(),
+        sender: incoming.sender.clone(),
+        direction: MessageDirection::Incoming,
+        status: MessageStatus::Delivered,
+        content,
+        sent_at,
+        server_timestamp,
+        delivered_at: Some(Utc::now()),
+        read_at: None,
+        quote: None,
+        reactions: Vec::new(),
+        expires_in_seconds: None,
+        expires_at: None,
+    }
 }
 
 impl SignalApp {
@@ -157,6 +228,7 @@ impl SignalApp {
             linking_state: LinkingState::default(),
             event_rx: Arc::new(RwLock::new(Some(event_rx))),
             event_tx,
+            selected_conversation_id: None,
         };
 
         // If we have an account, initialize Signal manager
@@ -225,11 +297,60 @@ impl SignalApp {
             SignalEvent::Error(error) => {
                 self.error_message = Some(error);
             }
+            SignalEvent::MessageReceived(incoming) => {
+                self.handle_incoming_message(&incoming);
+            }
             _ => {
-                // Handle other events as needed
                 tracing::debug!("Received event: {:?}", event);
             }
         }
+    }
+
+    fn handle_incoming_message(&self, incoming: &IncomingMessage) {
+        let Some(db) = self.storage.database() else {
+            tracing::warn!("No database available, cannot save message");
+            return;
+        };
+
+        let message = incoming_to_message(incoming);
+        let message_repo = MessageRepository::new(db);
+        let conv_repo = ConversationRepository::new(db);
+
+        let text_preview = match &incoming.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Attachment { .. } => "[Attachment]".to_string(),
+            MessageContent::Sticker { .. } => "[Sticker]".to_string(),
+            MessageContent::Reaction { emoji, .. } => format!("Reacted {}", emoji),
+            MessageContent::Quote { text, .. } => text.clone(),
+        };
+
+        if conv_repo.get(&incoming.conversation_id).is_none() {
+            let is_group = incoming.conversation_id != incoming.sender;
+            let conv = if is_group {
+                Conversation::new_group(&incoming.conversation_id, "Group")
+            } else {
+                Conversation::new_private(&incoming.conversation_id, &incoming.sender)
+            };
+            if let Err(e) = conv_repo.save(&conv) {
+                tracing::error!("Failed to create conversation: {}", e);
+                return;
+            }
+        }
+
+        if let Err(e) = message_repo.save(&message) {
+            tracing::error!("Failed to save message: {}", e);
+            return;
+        }
+
+        if let Some(mut conv) = conv_repo.get(&incoming.conversation_id) {
+            conv.update_last_message(&text_preview, message.sent_at);
+            conv.increment_unread();
+            if let Err(e) = conv_repo.save(&conv) {
+                tracing::error!("Failed to update conversation: {}", e);
+            }
+        }
+
+        tracing::info!("Saved message {} from {}", incoming.id, incoming.sender);
     }
 
     /// Start the device linking process
@@ -262,12 +383,11 @@ impl SignalApp {
         &self.linking_state
     }
 
-    /// Initialize the Signal manager with existing account
     fn initialize_signal_manager(&mut self) {
         let storage = self.storage.clone();
         let signal_manager = self.signal_manager.clone();
+        let event_tx = self.event_tx.clone();
 
-        // Use a dedicated thread for presage operations since its futures aren't Send-safe
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -275,10 +395,11 @@ impl SignalApp {
                 .expect("Failed to create runtime for Signal manager");
 
             rt.block_on(async move {
-                match SignalManager::from_storage(&storage).await {
+                match SignalManager::from_storage(&storage, event_tx.clone()).await {
                     Ok(manager) => {
                         *signal_manager.write() = Some(manager);
-                        tracing::info!("Signal manager initialized successfully");
+                        tracing::info!("Signal manager initialized, starting receive loop...");
+                        SignalManager::start_receiving(storage, event_tx);
                     }
                     Err(e) => {
                         tracing::error!("Failed to initialize Signal manager: {}", e);
@@ -318,19 +439,27 @@ impl SignalApp {
         &self.storage
     }
 
-    /// Get Signal manager
     pub fn signal_manager(&self) -> &Arc<RwLock<Option<SignalManager>>> {
         &self.signal_manager
+    }
+
+    pub fn selected_conversation_id(&self) -> Option<&str> {
+        self.selected_conversation_id.as_deref()
+    }
+
+    pub fn select_conversation(&mut self, id: Option<String>) {
+        self.selected_conversation_id = id;
     }
 }
 
 impl eframe::App for SignalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Request continuous repainting for real-time updates
-        ctx.request_repaint();
-
         // Process any pending Signal events
         self.process_events(ctx);
+
+        // Only repaint periodically to check for new events (not every frame)
+        // This reduces CPU usage from 100% to near 0% when idle
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         // Show error toast if present
         let mut dismiss_error = false;

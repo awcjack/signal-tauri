@@ -1,9 +1,16 @@
 //! Chat view - displays messages in a conversation
 
 use crate::app::SignalApp;
+use crate::signal::messages::{
+    Content as StorageContent, Message as StorageMessage,
+    MessageDirection as StorageDirection, MessageStatus as StorageStatus,
+};
+use crate::storage::conversations::ConversationRepository;
+use crate::storage::messages::MessageRepository;
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
-use egui::{Color32, Pos2, Rect, Rounding, Sense, Vec2};
+use egui::{Color32, Rounding, Sense, Vec2};
+use std::collections::HashMap;
 
 /// Message direction
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,6 +62,80 @@ pub struct Reaction {
     pub from_me: bool,
 }
 
+impl MessageItem {
+    fn from_storage(msg: &StorageMessage, my_id: Option<&str>) -> Self {
+        let direction = match msg.direction {
+            StorageDirection::Incoming => MessageDirection::Received,
+            StorageDirection::Outgoing => MessageDirection::Sent,
+        };
+
+        let status = match msg.status {
+            StorageStatus::Sending => MessageStatus::Sending,
+            StorageStatus::Sent => MessageStatus::Sent,
+            StorageStatus::Delivered => MessageStatus::Delivered,
+            StorageStatus::Read => MessageStatus::Read,
+            StorageStatus::Failed => MessageStatus::Failed,
+        };
+
+        let content = match &msg.content {
+            StorageContent::Text { body, .. } => MessageContent::Text(body.clone()),
+            StorageContent::Image { attachment_id, caption, .. } => MessageContent::Image {
+                path: attachment_id.clone(),
+                caption: caption.clone(),
+            },
+            StorageContent::Video { attachment_id, caption, .. } => MessageContent::Image {
+                path: attachment_id.clone(),
+                caption: caption.clone(),
+            },
+            StorageContent::Audio { duration_ms, .. } => MessageContent::Voice {
+                duration_secs: (*duration_ms / 1000) as u32,
+            },
+            StorageContent::File { filename, size, .. } => MessageContent::File {
+                name: filename.clone(),
+                size: *size,
+            },
+            StorageContent::Sticker { pack_id, sticker_id, .. } => MessageContent::Sticker {
+                pack_id: pack_id.clone(),
+                sticker_id: sticker_id.to_string(),
+            },
+            StorageContent::Contact { name, .. } => MessageContent::Contact { name: name.clone() },
+            StorageContent::Location { latitude, longitude, .. } => MessageContent::Location {
+                lat: *latitude,
+                lon: *longitude,
+            },
+            _ => MessageContent::Text("[Unsupported message type]".to_string()),
+        };
+
+        let mut reaction_counts: HashMap<String, (u32, bool)> = HashMap::new();
+        for r in &msg.reactions {
+            let entry = reaction_counts.entry(r.emoji.clone()).or_insert((0, false));
+            entry.0 += 1;
+            if my_id == Some(r.sender.as_str()) {
+                entry.1 = true;
+            }
+        }
+        let reactions: Vec<Reaction> = reaction_counts
+            .into_iter()
+            .map(|(emoji, (count, from_me))| Reaction { emoji, count, from_me })
+            .collect();
+
+        MessageItem {
+            id: msg.id.clone(),
+            direction,
+            content,
+            timestamp: msg.sent_at,
+            status,
+            sender_name: if direction == MessageDirection::Received {
+                Some(msg.sender.clone())
+            } else {
+                None
+            },
+            reply_to: None,
+            reactions,
+        }
+    }
+}
+
 /// Current chat view state
 pub struct ChatViewState {
     pub conversation_id: Option<String>,
@@ -74,21 +155,20 @@ impl Default for ChatViewState {
     }
 }
 
-/// Show the chat view
 pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
-    // Check if a conversation is selected
-    let has_conversation = true; // Placeholder - would check app state
+    let conversation_id = app.selected_conversation_id();
 
-    if !has_conversation {
+    if conversation_id.is_none() {
         show_empty_state(ui);
         return;
     }
 
-    // Conversation header
-    show_conversation_header(ui);
+    let conversation_id = conversation_id.unwrap();
+    let (conversation_name, messages) = load_conversation_data(app, conversation_id);
 
-    // Message area
-    let available_height = ui.available_height() - 60.0; // Reserve space for input
+    show_conversation_header(ui, &conversation_name);
+
+    let available_height = ui.available_height() - 60.0;
 
     egui::ScrollArea::vertical()
         .max_height(available_height)
@@ -97,11 +177,9 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            let messages = get_placeholder_messages();
             let mut last_date: Option<DateTime<Utc>> = None;
 
             for msg in &messages {
-                // Date separator
                 if should_show_date_separator(&last_date, &msg.timestamp) {
                     show_date_separator(ui, &msg.timestamp);
                 }
@@ -110,11 +188,42 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
                 show_message(ui, msg);
                 ui.add_space(4.0);
             }
+
+            if messages.is_empty() {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(40.0);
+                    ui.label("No messages yet");
+                    ui.add_space(8.0);
+                    ui.label("Send a message to start the conversation");
+                });
+            }
         });
 
-    // Message input area
     ui.separator();
-    show_message_input(ui);
+    show_message_input(app, ui, conversation_id);
+}
+
+fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Vec<MessageItem>) {
+    if let Some(db) = app.storage().database() {
+        let conv_repo = ConversationRepository::new(db);
+        let msg_repo = MessageRepository::new(db);
+
+        let name = conv_repo
+            .get(conversation_id)
+            .map(|c| c.name)
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let my_id = app.storage().get_phone_number();
+        let messages: Vec<MessageItem> = msg_repo
+            .get_for_conversation(conversation_id, 100, None)
+            .iter()
+            .map(|m| MessageItem::from_storage(m, my_id.as_deref()))
+            .collect();
+
+        (name, messages)
+    } else {
+        ("Demo Conversation".to_string(), get_placeholder_messages())
+    }
 }
 
 /// Show empty state when no conversation is selected
@@ -136,37 +245,50 @@ fn show_empty_state(ui: &mut egui::Ui) {
     });
 }
 
-/// Show conversation header
-fn show_conversation_header(ui: &mut egui::Ui) {
+fn show_conversation_header(ui: &mut egui::Ui, name: &str) {
     let header_height = 56.0;
 
     ui.horizontal(|ui| {
         ui.set_height(header_height);
         ui.add_space(8.0);
 
-        // Avatar
         let avatar_size = 40.0;
         let (avatar_rect, _) = ui.allocate_exact_size(Vec2::splat(avatar_size), Sense::hover());
-        ui.painter().circle_filled(
-            avatar_rect.center(),
-            avatar_size / 2.0,
-            Color32::from_rgb(0x4C, 0xAF, 0x50),
-        );
+
+        let avatar_color = {
+            let hash: u32 = name.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
+            let colors = [
+                Color32::from_rgb(0x4C, 0xAF, 0x50),
+                Color32::from_rgb(0x21, 0x96, 0xF3),
+                Color32::from_rgb(0xFF, 0x98, 0x00),
+                Color32::from_rgb(0xE9, 0x1E, 0x63),
+            ];
+            colors[(hash as usize) % colors.len()]
+        };
+
+        ui.painter().circle_filled(avatar_rect.center(), avatar_size / 2.0, avatar_color);
+
+        let initials: String = name
+            .split_whitespace()
+            .take(2)
+            .filter_map(|w| w.chars().next())
+            .collect::<String>()
+            .to_uppercase();
+
         ui.painter().text(
             avatar_rect.center(),
             egui::Align2::CENTER_CENTER,
-            "AS",
+            &initials,
             egui::FontId::proportional(14.0),
             Color32::WHITE,
         );
 
         ui.add_space(12.0);
 
-        // Name and status
         ui.vertical(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Alice Smith").strong().size(16.0));
-            ui.label(egui::RichText::new("Online").size(12.0).color(SignalColors::TEXT_SECONDARY));
+            ui.label(egui::RichText::new(name).strong().size(16.0));
+            ui.label(egui::RichText::new("").size(12.0).color(SignalColors::TEXT_SECONDARY));
         });
 
         // Right side buttons
@@ -363,46 +485,115 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
     });
 }
 
-/// Show message input area
-fn show_message_input(ui: &mut egui::Ui) {
+fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str) {
     static mut MESSAGE_INPUT: String = String::new();
 
     ui.horizontal(|ui| {
         ui.add_space(8.0);
 
-        // Attachment button
-        if ui.button("📎").on_hover_text("Attach file").clicked() {
-            // Open file picker
-        }
+        if ui.button("📎").on_hover_text("Attach file").clicked() {}
 
-        // Text input
-        let input = unsafe { &mut MESSAGE_INPUT };
+        let input = unsafe { &raw mut MESSAGE_INPUT };
+        let input = unsafe { &mut *input };
         let response = ui.add(
             egui::TextEdit::singleline(input)
                 .hint_text("Message...")
                 .desired_width(ui.available_width() - 100.0)
         );
 
-        // Emoji button
-        if ui.button("😀").on_hover_text("Emoji").clicked() {
-            // Open emoji picker
-        }
+        if ui.button("😀").on_hover_text("Emoji").clicked() {}
 
-        // Send button or voice button
         if input.is_empty() {
-            if ui.button("🎤").on_hover_text("Voice message").clicked() {
-                // Start recording
-            }
+            if ui.button("🎤").on_hover_text("Voice message").clicked() {}
         } else {
-            if ui.button("➤").on_hover_text("Send").clicked() ||
-               (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                tracing::info!("Sending message: {}", input);
+            let should_send = ui.button("➤").on_hover_text("Send").clicked() ||
+               (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            
+            if should_send {
+                let text = input.clone();
                 input.clear();
+                send_message(app, conversation_id, &text);
             }
         }
 
         ui.add_space(8.0);
     });
+}
+
+fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
+    use crate::signal::messages::{Content, Message, MessageDirection, MessageStatus};
+    use crate::storage::messages::MessageRepository;
+    use crate::storage::conversations::ConversationRepository;
+
+    let Some(db) = app.storage().database() else {
+        tracing::warn!("No database available, cannot send message");
+        return;
+    };
+
+    let my_id = app.storage().get_phone_number().unwrap_or_else(|| "me".to_string());
+    let message = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.to_string(),
+        sender: my_id,
+        direction: MessageDirection::Outgoing,
+        status: MessageStatus::Sending,
+        content: Content::Text {
+            body: text.to_string(),
+            mentions: Vec::new(),
+        },
+        sent_at: Utc::now(),
+        server_timestamp: None,
+        delivered_at: None,
+        read_at: None,
+        quote: None,
+        reactions: Vec::new(),
+        expires_in_seconds: None,
+        expires_at: None,
+    };
+
+    let msg_repo = MessageRepository::new(db);
+    if let Err(e) = msg_repo.save(&message) {
+        tracing::error!("Failed to save outgoing message: {}", e);
+        return;
+    }
+
+    let conv_repo = ConversationRepository::new(db);
+    if let Some(mut conv) = conv_repo.get(conversation_id) {
+        conv.update_last_message(text, message.sent_at);
+        let _ = conv_repo.save(&conv);
+    }
+
+    let storage = app.storage().clone();
+    let conversation_id = conversation_id.to_string();
+    let text = text.to_string();
+    let text_for_log = text.clone();
+    let is_group = !conversation_id.starts_with('<');
+    
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime for sending");
+        
+        rt.block_on(async move {
+            use crate::signal::manager::SignalManager;
+            
+            if is_group {
+                match SignalManager::send_group_message_static(&storage, &conversation_id, &text).await {
+                    Ok(()) => tracing::info!("Group message sent"),
+                    Err(e) => tracing::error!("Failed to send group message: {}", e),
+                }
+            } else {
+                let recipient_uuid = extract_uuid_from_service_id(&conversation_id);
+                match SignalManager::send_message_static(&storage, &recipient_uuid, &text).await {
+                    Ok(()) => tracing::info!("Message sent to {}", recipient_uuid),
+                    Err(e) => tracing::error!("Failed to send message: {}", e),
+                }
+            }
+        });
+    });
+
+    tracing::info!("Queued message for sending: {}", text_for_log);
 }
 
 /// Format file size for display
@@ -422,7 +613,16 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-/// Format duration for voice messages
+fn extract_uuid_from_service_id(service_id: &str) -> String {
+    if service_id.starts_with("<ACI:") && service_id.ends_with('>') {
+        service_id[5..service_id.len() - 1].to_string()
+    } else if service_id.starts_with("<PNI:") && service_id.ends_with('>') {
+        service_id[5..service_id.len() - 1].to_string()
+    } else {
+        service_id.to_string()
+    }
+}
+
 fn format_duration(secs: u32) -> String {
     let mins = secs / 60;
     let secs = secs % 60;

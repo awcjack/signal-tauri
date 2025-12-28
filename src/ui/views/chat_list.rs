@@ -1,6 +1,7 @@
 //! Chat list panel - shows all conversations
 
 use crate::app::SignalApp;
+use crate::storage::conversations::{Conversation, ConversationType, ConversationRepository};
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
@@ -30,24 +31,54 @@ impl ConversationItem {
             .collect::<String>()
             .to_uppercase()
     }
+
+    fn avatar_color_from_id(id: &str) -> Color32 {
+        let hash: u32 = id.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
+        let colors = [
+            Color32::from_rgb(0x4C, 0xAF, 0x50),
+            Color32::from_rgb(0x21, 0x96, 0xF3),
+            Color32::from_rgb(0xFF, 0x98, 0x00),
+            Color32::from_rgb(0xE9, 0x1E, 0x63),
+            Color32::from_rgb(0x9C, 0x27, 0xB0),
+            Color32::from_rgb(0x00, 0xBC, 0xD4),
+            Color32::from_rgb(0xFF, 0x57, 0x22),
+            Color32::from_rgb(0x60, 0x7D, 0x8B),
+        ];
+        colors[(hash as usize) % colors.len()]
+    }
 }
 
-/// Show the chat list
+impl From<&Conversation> for ConversationItem {
+    fn from(conv: &Conversation) -> Self {
+        ConversationItem {
+            id: conv.id.clone(),
+            name: conv.name.clone(),
+            avatar_color: ConversationItem::avatar_color_from_id(&conv.id),
+            last_message: conv.last_message.clone(),
+            last_message_time: conv.last_message_at,
+            unread_count: conv.unread_count,
+            is_group: matches!(conv.conversation_type, ConversationType::Group),
+            is_muted: conv.is_currently_muted(),
+            is_pinned: conv.is_pinned,
+            typing_indicator: false,
+        }
+    }
+}
+
 pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
-    // Header
     ui.horizontal(|ui| {
         ui.heading("Chats");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("✏").on_hover_text("New conversation").clicked() {
-                // Open new conversation dialog
             }
         });
     });
 
     ui.separator();
 
-    // Placeholder conversations for UI demonstration
-    let conversations = get_placeholder_conversations();
+    let conversations = load_conversations(app);
+    let selected_id = app.selected_conversation_id();
+    let mut new_selection: Option<String> = None;
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -55,10 +86,11 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
             ui.set_width(ui.available_width());
 
             for conv in &conversations {
-                show_conversation_item(ui, conv);
+                if let Some(id) = show_conversation_item(ui, conv, selected_id) {
+                    new_selection = Some(id);
+                }
             }
 
-            // Empty state if no conversations
             if conversations.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
@@ -67,37 +99,49 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
                     ui.label("Start a new conversation to begin messaging");
                     ui.add_space(16.0);
                     if ui.button("Start Conversation").clicked() {
-                        // Open new conversation dialog
                     }
                 });
             }
         });
+
+    if let Some(id) = new_selection {
+        app.select_conversation(Some(id));
+    }
 }
 
-/// Show a single conversation item
-fn show_conversation_item(ui: &mut egui::Ui, conv: &ConversationItem) {
+fn load_conversations(app: &SignalApp) -> Vec<ConversationItem> {
+    if let Some(db) = app.storage().database() {
+        let repo = ConversationRepository::new(db);
+        repo.list_active()
+            .iter()
+            .map(ConversationItem::from)
+            .collect()
+    } else {
+        get_placeholder_conversations()
+    }
+}
+
+fn show_conversation_item(ui: &mut egui::Ui, conv: &ConversationItem, selected_id: Option<&str>) -> Option<String> {
+    let mut clicked_id: Option<String> = None;
     let row_height = 72.0;
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), row_height),
         Sense::click(),
     );
 
-    // Highlight on hover
-    if response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            Rounding::ZERO,
-            SignalColors::DARK_SURFACE_ELEVATED,
-        );
-    }
-
-    // Selected state (placeholder)
-    let is_selected = false;
+    let is_selected = selected_id == Some(conv.id.as_str());
+    
     if is_selected {
         ui.painter().rect_filled(
             rect,
             Rounding::ZERO,
             SignalColors::SIGNAL_BLUE.linear_multiply(0.3),
+        );
+    } else if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            Rounding::ZERO,
+            SignalColors::DARK_SURFACE_ELEVATED,
         );
     }
 
@@ -209,13 +253,11 @@ fn show_conversation_item(ui: &mut egui::Ui, conv: &ConversationItem) {
         );
     }
 
-    // Handle click
     if response.clicked() {
         tracing::info!("Selected conversation: {}", conv.name);
-        // Update selected conversation in app state
+        clicked_id = Some(conv.id.clone());
     }
 
-    // Context menu
     response.context_menu(|ui| {
         if ui.button("Pin conversation").clicked() {
             ui.close_menu();
@@ -234,6 +276,8 @@ fn show_conversation_item(ui: &mut egui::Ui, conv: &ConversationItem) {
             ui.close_menu();
         }
     });
+
+    clicked_id
 }
 
 /// Format timestamp for display

@@ -1,12 +1,15 @@
 //! Chat list panel - shows all conversations
 
 use crate::app::SignalApp;
-use crate::storage::contacts::ContactRepository;
+use crate::storage::contacts::{ContactRepository, StoredContact};
 use crate::storage::conversations::{Conversation, ConversationType, ConversationRepository};
 use crate::ui::avatar_cache::AvatarCache;
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
+
+static mut SHOW_CONTACT_PICKER: bool = false;
+static mut CONTACT_SEARCH: String = String::new();
 
 #[derive(Debug, Clone)]
 pub struct ConversationItem {
@@ -69,48 +72,236 @@ impl From<&Conversation> for ConversationItem {
 }
 
 pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
+    let show_picker = unsafe { &raw mut SHOW_CONTACT_PICKER };
+    let show_picker = unsafe { &mut *show_picker };
+    
     ui.horizontal(|ui| {
         ui.heading("Chats");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("✏").on_hover_text("New conversation").clicked() {
+                *show_picker = true;
             }
         });
     });
 
     ui.separator();
 
-    let conversations = load_conversations(app);
-    let selected_id = app.selected_conversation_id();
     let mut new_selection: Option<String> = None;
 
-    let avatar_cache = app.avatar_cache();
+    if *show_picker {
+        if let Some(selected) = show_contact_picker(app, ui) {
+            new_selection = Some(selected);
+            *show_picker = false;
+        }
+    } else {
+        let conversations = load_conversations(app);
+        let selected_id = app.selected_conversation_id();
+        let avatar_cache = app.avatar_cache();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+
+                for conv in &conversations {
+                    if let Some(id) = show_conversation_item(ui, conv, selected_id, avatar_cache) {
+                        new_selection = Some(id);
+                    }
+                }
+
+                if conversations.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label("No conversations yet");
+                        ui.add_space(8.0);
+                        ui.label("Start a new conversation to begin messaging");
+                        ui.add_space(16.0);
+                        if ui.button("Start Conversation").clicked() {
+                            *show_picker = true;
+                        }
+                    });
+                }
+            });
+    }
+
+    if let Some(id) = new_selection {
+        app.select_conversation(Some(id));
+    }
+}
+
+fn show_contact_picker(app: &mut SignalApp, ui: &mut egui::Ui) -> Option<String> {
+    let search = unsafe { &raw mut CONTACT_SEARCH };
+    let search = unsafe { &mut *search };
+    let show_picker = unsafe { &raw mut SHOW_CONTACT_PICKER };
+    let show_picker = unsafe { &mut *show_picker };
+    
+    let mut selected_contact_id: Option<String> = None;
+
+    ui.horizontal(|ui| {
+        if ui.button("←").on_hover_text("Back").clicked() {
+            *show_picker = false;
+            search.clear();
+        }
+        ui.heading("New Conversation");
+    });
+
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.add(
+            egui::TextEdit::singleline(search)
+                .hint_text("Search contacts...")
+                .desired_width(ui.available_width() - 16.0)
+        );
+    });
+
+    ui.add_space(8.0);
+
+    let contacts = load_contacts(app, search);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            for conv in &conversations {
-                if let Some(id) = show_conversation_item(ui, conv, selected_id, avatar_cache) {
-                    new_selection = Some(id);
-                }
-            }
-
-            if conversations.is_empty() {
+            if contacts.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(40.0);
-                    ui.label("No conversations yet");
-                    ui.add_space(8.0);
-                    ui.label("Start a new conversation to begin messaging");
-                    ui.add_space(16.0);
-                    if ui.button("Start Conversation").clicked() {
+                    if search.is_empty() {
+                        ui.label("No contacts available");
+                    } else {
+                        ui.label("No contacts found");
                     }
                 });
             }
+
+            for contact in &contacts {
+                if show_contact_item(ui, contact) {
+                    selected_contact_id = Some(contact.uuid.clone());
+                }
+            }
         });
 
-    if let Some(id) = new_selection {
-        app.select_conversation(Some(id));
+    if let Some(ref contact_id) = selected_contact_id {
+        ensure_conversation_exists(app, contact_id);
+        search.clear();
+    }
+
+    selected_contact_id
+}
+
+fn load_contacts(app: &SignalApp, search: &str) -> Vec<StoredContact> {
+    if let Some(db) = app.storage().database() {
+        let contact_repo = ContactRepository::new(&*db);
+        let mut contacts = contact_repo.list();
+        
+        if !search.is_empty() {
+            let search_lower = search.to_lowercase();
+            contacts.retain(|c| {
+                c.display_name().to_lowercase().contains(&search_lower)
+                    || c.phone_number.as_ref().map(|p| p.contains(search)).unwrap_or(false)
+            });
+        }
+        
+        contacts
+    } else {
+        Vec::new()
+    }
+}
+
+fn show_contact_item(ui: &mut egui::Ui, contact: &StoredContact) -> bool {
+    let row_height = 56.0;
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), row_height),
+        Sense::click(),
+    );
+
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            Rounding::ZERO,
+            SignalColors::DARK_SURFACE_ELEVATED,
+        );
+    }
+
+    let avatar_size = 40.0;
+    let padding = 12.0;
+
+    let avatar_rect = egui::Rect::from_min_size(
+        rect.min + Vec2::new(padding, (row_height - avatar_size) / 2.0),
+        Vec2::splat(avatar_size),
+    );
+
+    let center = avatar_rect.center();
+    let radius = avatar_size / 2.0;
+    let avatar_color = {
+        let hash: u32 = contact.uuid.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
+        let colors = [
+            Color32::from_rgb(0x4C, 0xAF, 0x50),
+            Color32::from_rgb(0x21, 0x96, 0xF3),
+            Color32::from_rgb(0xFF, 0x98, 0x00),
+            Color32::from_rgb(0xE9, 0x1E, 0x63),
+        ];
+        colors[(hash as usize) % colors.len()]
+    };
+
+    ui.painter().circle_filled(center, radius, avatar_color);
+
+    let initials: String = contact.display_name()
+        .split_whitespace()
+        .take(2)
+        .filter_map(|w| w.chars().next())
+        .collect::<String>()
+        .to_uppercase();
+
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        &initials,
+        egui::FontId::proportional(14.0),
+        Color32::WHITE,
+    );
+
+    let text_left = avatar_rect.right() + padding;
+    
+    ui.painter().text(
+        egui::Pos2::new(text_left, rect.min.y + 12.0),
+        egui::Align2::LEFT_TOP,
+        contact.display_name(),
+        egui::FontId::proportional(15.0),
+        SignalColors::TEXT_PRIMARY,
+    );
+
+    if let Some(phone) = &contact.phone_number {
+        ui.painter().text(
+            egui::Pos2::new(text_left, rect.min.y + 32.0),
+            egui::Align2::LEFT_TOP,
+            phone,
+            egui::FontId::proportional(12.0),
+            SignalColors::TEXT_SECONDARY,
+        );
+    }
+
+    response.clicked()
+}
+
+fn ensure_conversation_exists(app: &SignalApp, contact_uuid: &str) {
+    if let Some(db) = app.storage().database() {
+        let conv_repo = ConversationRepository::new(&*db);
+        
+        if conv_repo.get(contact_uuid).is_none() {
+            let contact_repo = ContactRepository::new(&*db);
+            let name = contact_repo
+                .get_by_uuid(contact_uuid)
+                .map(|c| c.display_name().to_string())
+                .unwrap_or_else(|| contact_uuid.to_string());
+            
+            let conv = Conversation::new_private(contact_uuid, &name);
+            if let Err(e) = conv_repo.save(&conv) {
+                tracing::error!("Failed to create conversation: {}", e);
+            }
+        }
     }
 }
 

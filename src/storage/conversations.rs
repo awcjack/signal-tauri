@@ -243,7 +243,10 @@ impl<'a> ConversationRepository<'a> {
     }
 
     pub fn list_active(&self) -> Vec<Conversation> {
-        self.list().into_iter().filter(|c| !c.is_archived).collect()
+        self.list()
+            .into_iter()
+            .filter(|c| !c.is_archived && c.last_message.is_some())
+            .collect()
     }
 
     pub fn list_archived(&self) -> Vec<Conversation> {

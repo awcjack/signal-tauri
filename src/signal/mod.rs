@@ -5,6 +5,9 @@ pub mod messages;
 pub mod contacts;
 pub mod groups;
 pub mod attachments;
+pub mod provisioning;
+pub mod registration;
+pub mod backup;
 
 pub use manager::{ConnectionState, SignalEvent, SignalManager};
 

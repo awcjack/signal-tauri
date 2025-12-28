@@ -215,11 +215,12 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
             .unwrap_or_else(|| "Unknown".to_string());
 
         let my_id = app.storage().get_phone_number();
-        let messages: Vec<MessageItem> = msg_repo
+        let mut messages: Vec<MessageItem> = msg_repo
             .get_for_conversation(conversation_id, 100, None)
             .iter()
             .map(|m| MessageItem::from_storage(m, my_id.as_deref()))
             .collect();
+        messages.reverse();
 
         (name, messages)
     } else {

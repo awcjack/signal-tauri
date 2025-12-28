@@ -536,6 +536,26 @@ impl SignalManager {
                             } else {
                                 tracing::info!("Contacts synced to local database");
                                 let _ = event_tx.send(SignalEvent::ContactUpdated { contact_id: "all".to_string() });
+                                
+                                if let Err(e) = crate::signal::profiles::update_conversations_from_contacts(storage) {
+                                    tracing::warn!("Failed to update conversations from contacts: {}", e);
+                                }
+                                
+                                tracing::info!("Starting avatar sync for contacts...");
+                                match crate::signal::profiles::sync_contact_avatars(&mut manager, storage).await {
+                                    Ok(count) => {
+                                        tracing::info!("Avatar sync complete: {} avatars fetched", count);
+                                        if count > 0 {
+                                            if let Err(e) = crate::signal::profiles::update_conversations_from_contacts(storage) {
+                                                tracing::warn!("Failed to update conversations after avatar sync: {}", e);
+                                            }
+                                            let _ = event_tx.send(SignalEvent::ContactUpdated { contact_id: "avatars".to_string() });
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Avatar sync failed: {}", e);
+                                    }
+                                }
                             }
                         }
                         Some(Received::Content(content)) => {
@@ -598,6 +618,12 @@ impl SignalManager {
             let uuid_str = presage_contact.uuid.to_string();
             let phone_str = presage_contact.phone_number.map(|p| p.to_string());
 
+            let existing = repo.get_by_uuid(&uuid_str);
+            let (existing_avatar_path, existing_created_at) = match existing {
+                Some(c) => (c.avatar_path, c.created_at),
+                None => (None, now),
+            };
+
             let stored_contact = StoredContact {
                 id: uuid_str.clone(),
                 uuid: uuid_str,
@@ -608,7 +634,7 @@ impl SignalManager {
                 } else {
                     Some(presage_contact.name)
                 },
-                avatar_path: None,
+                avatar_path: existing_avatar_path,
                 profile_key: if presage_contact.profile_key.is_empty() {
                     None
                 } else {
@@ -616,7 +642,7 @@ impl SignalManager {
                 },
                 is_blocked: false,
                 is_verified: false,
-                created_at: now,
+                created_at: existing_created_at,
                 updated_at: now,
             };
 
@@ -770,7 +796,7 @@ impl SignalManager {
     fn process_content(content: &Content) -> Option<IncomingMessage> {
         use presage::libsignal_service::content::ContentBody;
 
-        let sender = format!("{:?}", content.metadata.sender);
+        let sender = content.metadata.sender.raw_uuid().to_string();
         let timestamp = content.metadata.timestamp as i64;
 
         match &content.body {
@@ -826,6 +852,18 @@ impl SignalManager {
         })
     }
 
+    /// Normalize a service ID string to plain UUID format.
+    /// Signal uses formats like "ACI:uuid" or "PNI:uuid" - this strips the prefix.
+    fn normalize_service_id(service_id: &str) -> String {
+        if let Some(uuid_part) = service_id.strip_prefix("ACI:") {
+            uuid_part.to_lowercase()
+        } else if let Some(uuid_part) = service_id.strip_prefix("PNI:") {
+            uuid_part.to_lowercase()
+        } else {
+            service_id.to_lowercase()
+        }
+    }
+
     fn process_sync_message(
         sync_msg: &presage::libsignal_service::proto::SyncMessage,
         _sender: &str,
@@ -843,12 +881,12 @@ impl SignalManager {
                         use base64::Engine;
                         base64::engine::general_purpose::STANDARD.encode(master_key)
                     } else if let Some(dest) = &sent.destination_service_id {
-                        dest.clone()
+                        Self::normalize_service_id(dest)
                     } else {
                         return None;
                     }
                 } else if let Some(dest) = &sent.destination_service_id {
-                    dest.clone()
+                    Self::normalize_service_id(dest)
                 } else {
                     return None;
                 };

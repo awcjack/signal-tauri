@@ -5,6 +5,7 @@ pub mod messages;
 pub mod contacts;
 pub mod groups;
 pub mod attachments;
+pub mod profiles;
 pub mod provisioning;
 pub mod registration;
 pub mod backup;

@@ -1,6 +1,7 @@
 //! Chat list panel - shows all conversations
 
 use crate::app::SignalApp;
+use crate::storage::contacts::ContactRepository;
 use crate::storage::conversations::{Conversation, ConversationType, ConversationRepository};
 use crate::ui::avatar_cache::AvatarCache;
 use crate::ui::theme::SignalColors;
@@ -115,10 +116,25 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
 
 fn load_conversations(app: &SignalApp) -> Vec<ConversationItem> {
     if let Some(db) = app.storage().database() {
-        let repo = ConversationRepository::new(&*db);
-        repo.list_active()
+        let conv_repo = ConversationRepository::new(&*db);
+        let contact_repo = ContactRepository::new(&*db);
+        
+        conv_repo.list_active()
             .iter()
-            .map(ConversationItem::from)
+            .map(|conv| {
+                let mut item = ConversationItem::from(conv);
+                
+                if item.avatar_path.is_none() && !item.is_group {
+                    if let Some(contact) = contact_repo.get_by_uuid(&conv.id) {
+                        if item.name == conv.id || item.name.starts_with("Aci(") {
+                            item.name = contact.display_name().to_string();
+                        }
+                        item.avatar_path = contact.avatar_path.clone();
+                    }
+                }
+                
+                item
+            })
             .collect()
     } else {
         Vec::new()

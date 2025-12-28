@@ -3,7 +3,8 @@
 use crate::signal::manager::{IncomingMessage, MessageContent};
 use crate::signal::messages::{Content, Message, MessageDirection, MessageStatus};
 use crate::signal::{ConnectionState as SignalConnectionState, SignalEvent, SignalManager};
-use crate::storage::conversations::{Conversation, ConversationRepository};
+use crate::storage::contacts::ContactRepository;
+use crate::storage::conversations::{Conversation, ConversationType, ConversationRepository};
 use crate::storage::messages::MessageRepository;
 use crate::storage::Storage;
 use crate::ui::avatar_cache::AvatarCache;
@@ -330,12 +331,39 @@ impl SignalApp {
         };
 
         if conv_repo.get(&incoming.conversation_id).is_none() {
-            let is_group = incoming.conversation_id != incoming.sender;
+            let is_group = incoming.conversation_id != incoming.sender 
+                && incoming.sender != "self";
+            
             let conv = if is_group {
                 Conversation::new_group(&incoming.conversation_id, "Group")
             } else {
-                Conversation::new_private(&incoming.conversation_id, &incoming.sender)
+                let contact_repo = ContactRepository::new(&*db);
+                
+                let is_note_to_self = incoming.sender == "self";
+                let contact_uuid = if is_note_to_self {
+                    &incoming.conversation_id
+                } else {
+                    &incoming.sender
+                };
+                
+                let (name, avatar_path) = if is_note_to_self {
+                    ("Note to Self".to_string(), None)
+                } else if let Some(contact) = contact_repo.get_by_uuid(contact_uuid) {
+                    (contact.display_name().to_string(), contact.avatar_path.clone())
+                } else {
+                    (contact_uuid.to_string(), None)
+                };
+                
+                let mut conv = Conversation::new_private(&incoming.conversation_id, &name);
+                conv.avatar_path = avatar_path;
+                
+                if is_note_to_self {
+                    conv.conversation_type = ConversationType::NoteToSelf;
+                }
+                
+                conv
             };
+            
             if let Err(e) = conv_repo.save(&conv) {
                 tracing::error!("Failed to create conversation: {}", e);
                 return;

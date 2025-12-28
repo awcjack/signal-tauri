@@ -17,7 +17,14 @@ use std::sync::Arc;
 pub struct BackupData {
     pub messages: Vec<BackupMessage>,
     pub conversations: Vec<BackupConversation>,
+    pub chats: Vec<BackupChat>,
     pub frame_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupChat {
+    pub id: u64,
+    pub recipient_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -76,11 +83,23 @@ pub fn import_backup_data(
     let mut conversations_imported = 0;
     let mut messages_imported = 0;
 
-    let conv_map: std::collections::HashMap<String, &BackupConversation> = backup_data
+    let chat_to_recipient: std::collections::HashMap<u64, u64> = backup_data
+        .chats
+        .iter()
+        .map(|c| (c.id, c.recipient_id))
+        .collect();
+
+    let recipient_map: std::collections::HashMap<String, &BackupConversation> = backup_data
         .conversations
         .iter()
         .map(|c| (c.id.clone(), c))
         .collect();
+
+    tracing::debug!(
+        "Built mappings: {} chats -> recipients, {} recipients",
+        chat_to_recipient.len(),
+        recipient_map.len()
+    );
 
     for backup_conv in &backup_data.conversations {
         let conversation = convert_backup_conversation(backup_conv);
@@ -103,7 +122,11 @@ pub fn import_backup_data(
             continue;
         }
 
-        let conv_info = conv_map.get(&backup_msg.conversation_id);
+        let chat_id: u64 = backup_msg.conversation_id.parse().unwrap_or(0);
+        let recipient_id = chat_to_recipient.get(&chat_id).copied();
+        let conv_info = recipient_id
+            .map(|rid| rid.to_string())
+            .and_then(|rid_str| recipient_map.get(&rid_str));
         
         let message = convert_backup_message(backup_msg, conv_info);
         
@@ -264,6 +287,7 @@ fn parse_backup(data: &[u8]) -> Result<BackupData, SignalError> {
     
     let mut messages = Vec::new();
     let mut conversations = Vec::new();
+    let mut chats = Vec::new();
     let mut offset = 0;
     let mut frame_count = 0;
     
@@ -282,21 +306,23 @@ fn parse_backup(data: &[u8]) -> Result<BackupData, SignalError> {
         offset += frame_len;
         frame_count += 1;
         
-        if let Err(e) = parse_frame(frame_data, &mut messages, &mut conversations) {
+        if let Err(e) = parse_frame(frame_data, &mut messages, &mut conversations, &mut chats) {
             tracing::debug!("Frame {} parse error (non-fatal): {}", frame_count, e);
         }
     }
     
     tracing::info!(
-        "Parsed {} frames: {} conversations, {} messages",
+        "Parsed {} frames: {} conversations, {} chats, {} messages",
         frame_count,
         conversations.len(),
+        chats.len(),
         messages.len()
     );
     
     Ok(BackupData {
         messages,
         conversations,
+        chats,
         frame_count,
     })
 }
@@ -305,6 +331,7 @@ fn parse_frame(
     data: &[u8],
     messages: &mut Vec<BackupMessage>,
     conversations: &mut Vec<BackupConversation>,
+    chats: &mut Vec<BackupChat>,
 ) -> Result<(), SignalError> {
     let mut field_offset = 0;
     
@@ -321,6 +348,17 @@ fn parse_frame(
                     if end <= data.len() {
                         if let Some(conv) = parse_recipient(&data[field_offset..end]) {
                             conversations.push(conv);
+                        }
+                        field_offset = end;
+                    }
+                }
+            }
+            (3, 2) => {
+                if let Some(len) = read_varint(data, &mut field_offset) {
+                    let end = field_offset + len as usize;
+                    if end <= data.len() {
+                        if let Some(chat) = parse_chat(&data[field_offset..end]) {
+                            chats.push(chat);
                         }
                         field_offset = end;
                     }
@@ -411,6 +449,42 @@ fn parse_recipient(data: &[u8]) -> Option<BackupConversation> {
         group_id,
         name,
     })
+}
+
+fn parse_chat(data: &[u8]) -> Option<BackupChat> {
+    let mut id: Option<u64> = None;
+    let mut recipient_id: Option<u64> = None;
+    let mut offset = 0;
+    
+    while offset < data.len() {
+        let tag_byte = data[offset];
+        let wire_type = tag_byte & 0x07;
+        let field_number = tag_byte >> 3;
+        offset += 1;
+        
+        match (field_number, wire_type) {
+            (1, 0) => {
+                id = read_varint(data, &mut offset);
+            }
+            (2, 0) => {
+                recipient_id = read_varint(data, &mut offset);
+            }
+            (_, 0) => { read_varint(data, &mut offset); }
+            (_, 1) => { offset += 8; }
+            (_, 2) => {
+                if let Some(len) = read_varint(data, &mut offset) {
+                    offset += len as usize;
+                }
+            }
+            (_, 5) => { offset += 4; }
+            _ => break,
+        }
+    }
+    
+    match (id, recipient_id) {
+        (Some(i), Some(r)) => Some(BackupChat { id: i, recipient_id: r }),
+        _ => None,
+    }
 }
 
 fn parse_contact(data: &[u8]) -> Option<(Option<String>, Option<String>)> {

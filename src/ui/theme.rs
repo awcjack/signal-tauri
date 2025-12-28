@@ -1,6 +1,9 @@
 //! Signal-inspired theme for egui
 
-use egui::{Color32, FontFamily, FontId, Rounding, Stroke, Style, TextStyle, Visuals};
+use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Rounding, Stroke, Style, TextStyle, Visuals};
+use std::sync::Once;
+
+static FONTS_CONFIGURED: Once = Once::new();
 
 /// Signal-inspired color palette
 pub struct SignalColors;
@@ -61,6 +64,10 @@ impl SignalTheme {
 
     /// Apply theme to egui context
     pub fn apply(&self, ctx: &egui::Context) {
+        FONTS_CONFIGURED.call_once(|| {
+            configure_cjk_fonts(ctx);
+        });
+
         let mut style = Style::default();
 
         // Configure visuals
@@ -170,4 +177,82 @@ impl SignalTheme {
 
         visuals
     }
+}
+
+fn configure_cjk_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let mut cjk_loaded = false;
+
+    let cjk_font_paths: &[&str] = &[
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        #[cfg(target_os = "windows")]
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        #[cfg(target_os = "windows")]
+        "C:\\Windows\\Fonts\\simsun.ttc",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+    ];
+
+    for font_path in cjk_font_paths {
+        if let Ok(font_data) = std::fs::read(font_path) {
+            fonts.font_data.insert(
+                "cjk_fallback".to_owned(),
+                FontData::from_owned(font_data).tweak(egui::FontTweak {
+                    scale: 1.0,
+                    y_offset_factor: 0.0,
+                    y_offset: 0.0,
+                    baseline_offset_factor: 0.15,
+                }),
+            );
+            cjk_loaded = true;
+            break;
+        }
+    }
+
+    let symbol_font_paths: &[&str] = &[
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Supplemental/Apple Symbols.ttf",
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Symbol.ttf",
+        #[cfg(target_os = "windows")]
+        "C:\\Windows\\Fonts\\segmdl2.ttf",
+        #[cfg(target_os = "windows")]
+        "C:\\Windows\\Fonts\\symbol.ttf",
+    ];
+
+    for font_path in symbol_font_paths {
+        if let Ok(font_data) = std::fs::read(font_path) {
+            fonts.font_data.insert(
+                "symbols".to_owned(),
+                FontData::from_owned(font_data),
+            );
+            break;
+        }
+    }
+
+    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+        if cjk_loaded {
+            family.push("cjk_fallback".to_owned());
+        }
+        if fonts.font_data.contains_key("symbols") {
+            family.push("symbols".to_owned());
+        }
+    }
+    if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
+        if cjk_loaded {
+            family.push("cjk_fallback".to_owned());
+        }
+        if fonts.font_data.contains_key("symbols") {
+            family.push("symbols".to_owned());
+        }
+    }
+
+    ctx.set_fonts(fonts);
 }

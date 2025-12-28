@@ -2,6 +2,7 @@
 
 use crate::ui::theme::SignalColors;
 use egui::{Color32, Rounding, Vec2};
+use super::emoji_text::show_emoji_text;
 
 /// Message bubble direction
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,7 +81,7 @@ pub fn text_message(
     timestamp: &str,
 ) {
     MessageBubble::new(direction).show(ui, |ui| {
-        ui.label(egui::RichText::new(text).color(Color32::WHITE));
+        show_emoji_text(ui, text, Color32::WHITE);
 
         ui.horizontal(|ui| {
             ui.label(

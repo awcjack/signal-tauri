@@ -10,6 +10,7 @@ use crate::storage::messages::MessageRepository;
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
+use crate::ui::components::emoji_text::show_emoji_text;
 use std::collections::HashMap;
 
 /// Message direction
@@ -403,7 +404,7 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
                 // Message content
                 match &msg.content {
                     MessageContent::Text(text) => {
-                        ui.label(egui::RichText::new(text).color(Color32::WHITE));
+                        show_emoji_text(ui, text, Color32::WHITE);
                     }
                     MessageContent::Image { caption, .. } => {
                         // Placeholder for image
@@ -418,7 +419,7 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
                         );
 
                         if let Some(cap) = caption {
-                            ui.label(egui::RichText::new(cap).color(Color32::WHITE));
+                            show_emoji_text(ui, cap, Color32::WHITE);
                         }
                     }
                     MessageContent::File { name, size } => {

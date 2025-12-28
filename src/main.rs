@@ -42,7 +42,10 @@ fn main() -> Result<()> {
     eframe::run_native(
         "Signal",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::SignalApp::new(cc)))),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(app::SignalApp::new(cc)))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("Failed to run application: {}", e))
 }

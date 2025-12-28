@@ -6,6 +6,7 @@ use crate::signal::{ConnectionState as SignalConnectionState, SignalEvent, Signa
 use crate::storage::conversations::{Conversation, ConversationRepository};
 use crate::storage::messages::MessageRepository;
 use crate::storage::Storage;
+use crate::ui::avatar_cache::AvatarCache;
 use crate::ui::{theme::SignalTheme, views::ViewState};
 use chrono::{TimeZone, Utc};
 use parking_lot::RwLock;
@@ -70,6 +71,7 @@ pub struct SignalApp {
     event_rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<SignalEvent>>>>,
     event_tx: mpsc::UnboundedSender<SignalEvent>,
     selected_conversation_id: Option<String>,
+    avatar_cache: AvatarCache,
 }
 
 /// Connection status to Signal servers
@@ -232,6 +234,7 @@ impl SignalApp {
             event_rx: Arc::new(RwLock::new(Some(event_rx))),
             event_tx,
             selected_conversation_id: None,
+            avatar_cache: AvatarCache::new(),
         };
 
         if has_account && !needs_password {
@@ -451,6 +454,10 @@ impl SignalApp {
 
     pub fn select_conversation(&mut self, id: Option<String>) {
         self.selected_conversation_id = id;
+    }
+
+    pub fn avatar_cache(&self) -> &AvatarCache {
+        &self.avatar_cache
     }
 
     pub fn on_database_unlocked(&mut self) {

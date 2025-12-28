@@ -2,16 +2,17 @@
 
 use crate::app::SignalApp;
 use crate::storage::conversations::{Conversation, ConversationType, ConversationRepository};
+use crate::ui::avatar_cache::AvatarCache;
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
 
-/// A conversation in the chat list
 #[derive(Debug, Clone)]
 pub struct ConversationItem {
     pub id: String,
     pub name: String,
     pub avatar_color: Color32,
+    pub avatar_path: Option<String>,
     pub last_message: Option<String>,
     pub last_message_time: Option<DateTime<Utc>>,
     pub unread_count: u32,
@@ -54,6 +55,7 @@ impl From<&Conversation> for ConversationItem {
             id: conv.id.clone(),
             name: conv.name.clone(),
             avatar_color: ConversationItem::avatar_color_from_id(&conv.id),
+            avatar_path: conv.avatar_path.clone(),
             last_message: conv.last_message.clone(),
             last_message_time: conv.last_message_at,
             unread_count: conv.unread_count,
@@ -80,13 +82,15 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
     let selected_id = app.selected_conversation_id();
     let mut new_selection: Option<String> = None;
 
+    let avatar_cache = app.avatar_cache();
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
             for conv in &conversations {
-                if let Some(id) = show_conversation_item(ui, conv, selected_id) {
+                if let Some(id) = show_conversation_item(ui, conv, selected_id, avatar_cache) {
                     new_selection = Some(id);
                 }
             }
@@ -121,7 +125,12 @@ fn load_conversations(app: &SignalApp) -> Vec<ConversationItem> {
     }
 }
 
-fn show_conversation_item(ui: &mut egui::Ui, conv: &ConversationItem, selected_id: Option<&str>) -> Option<String> {
+fn show_conversation_item(
+    ui: &mut egui::Ui,
+    conv: &ConversationItem,
+    selected_id: Option<&str>,
+    avatar_cache: &AvatarCache,
+) -> Option<String> {
     let mut clicked_id: Option<String> = None;
     let row_height = 72.0;
     let (rect, response) = ui.allocate_exact_size(
@@ -145,32 +154,36 @@ fn show_conversation_item(ui: &mut egui::Ui, conv: &ConversationItem, selected_i
         );
     }
 
-    // Layout the conversation item
     let avatar_size = 48.0;
     let padding = 12.0;
 
-    // Avatar
     let avatar_rect = egui::Rect::from_min_size(
         rect.min + Vec2::new(padding, (row_height - avatar_size) / 2.0),
         Vec2::splat(avatar_size),
     );
 
-    // Draw avatar circle
-    ui.painter().circle_filled(
-        avatar_rect.center(),
-        avatar_size / 2.0,
-        conv.avatar_color,
-    );
-
-    // Draw initials
     let initials = conv.initials();
-    ui.painter().text(
-        avatar_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        &initials,
-        egui::FontId::proportional(16.0),
-        Color32::WHITE,
-    );
+    let center = avatar_rect.center();
+    let radius = avatar_size / 2.0;
+
+    if let Some(texture) = avatar_cache.get_or_load(ui.ctx(), &conv.id, conv.avatar_path.as_deref()) {
+        ui.painter().image(
+            texture.id(),
+            avatar_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        ui.painter().circle_stroke(center, radius, egui::Stroke::new(2.0, Color32::from_gray(30)));
+    } else {
+        ui.painter().circle_filled(center, radius, conv.avatar_color);
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            &initials,
+            egui::FontId::proportional(16.0),
+            Color32::WHITE,
+        );
+    }
 
     // Text area
     let text_left = avatar_rect.right() + padding;

@@ -7,9 +7,22 @@ use crate::ui::avatar_cache::AvatarCache;
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static mut SHOW_CONTACT_PICKER: bool = false;
 static mut CONTACT_SEARCH: String = String::new();
+static mut CACHED_CONVERSATIONS: Vec<ConversationItem> = Vec::new();
+static mut CACHED_CONTACTS: Vec<StoredContact> = Vec::new();
+static CONVERSATIONS_DIRTY: AtomicBool = AtomicBool::new(true);
+static CONTACTS_DIRTY: AtomicBool = AtomicBool::new(true);
+
+pub fn invalidate_conversations_cache() {
+    CONVERSATIONS_DIRTY.store(true, Ordering::SeqCst);
+}
+
+pub fn invalidate_contacts_cache() {
+    CONTACTS_DIRTY.store(true, Ordering::SeqCst);
+}
 
 #[derive(Debug, Clone)]
 pub struct ConversationItem {
@@ -192,22 +205,29 @@ fn show_contact_picker(app: &mut SignalApp, ui: &mut egui::Ui) -> Option<String>
 }
 
 fn load_contacts(app: &SignalApp, search: &str) -> Vec<StoredContact> {
-    if let Some(db) = app.storage().database() {
-        let contact_repo = ContactRepository::new(&*db);
-        let mut contacts = contact_repo.list();
-        
-        if !search.is_empty() {
-            let search_lower = search.to_lowercase();
-            contacts.retain(|c| {
-                c.display_name().to_lowercase().contains(&search_lower)
-                    || c.phone_number.as_ref().map(|p| p.contains(search)).unwrap_or(false)
-            });
+    let cache = unsafe { &raw mut CACHED_CONTACTS };
+    let cache = unsafe { &mut *cache };
+    
+    if CONTACTS_DIRTY.load(Ordering::SeqCst) {
+        if let Some(db) = app.storage().database() {
+            let contact_repo = ContactRepository::new(&*db);
+            *cache = contact_repo.list();
+            CONTACTS_DIRTY.store(false, Ordering::SeqCst);
         }
-        
-        contacts
-    } else {
-        Vec::new()
     }
+    
+    if search.is_empty() {
+        return cache.clone();
+    }
+    
+    let search_lower = search.to_lowercase();
+    cache.iter()
+        .filter(|c| {
+            c.display_name().to_lowercase().contains(&search_lower)
+                || c.phone_number.as_ref().map(|p| p.contains(search)).unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 fn show_contact_item(ui: &mut egui::Ui, contact: &StoredContact) -> bool {
@@ -306,11 +326,18 @@ fn ensure_conversation_exists(app: &SignalApp, contact_uuid: &str) {
 }
 
 fn load_conversations(app: &SignalApp) -> Vec<ConversationItem> {
+    let cache = unsafe { &raw mut CACHED_CONVERSATIONS };
+    let cache = unsafe { &mut *cache };
+    
+    if !CONVERSATIONS_DIRTY.load(Ordering::SeqCst) {
+        return cache.clone();
+    }
+    
     if let Some(db) = app.storage().database() {
         let conv_repo = ConversationRepository::new(&*db);
         let contact_repo = ContactRepository::new(&*db);
         
-        conv_repo.list_active()
+        let conversations: Vec<ConversationItem> = conv_repo.list_active()
             .iter()
             .map(|conv| {
                 let mut item = ConversationItem::from(conv);
@@ -326,7 +353,11 @@ fn load_conversations(app: &SignalApp) -> Vec<ConversationItem> {
                 
                 item
             })
-            .collect()
+            .collect();
+        
+        *cache = conversations.clone();
+        CONVERSATIONS_DIRTY.store(false, Ordering::SeqCst);
+        conversations
     } else {
         Vec::new()
     }

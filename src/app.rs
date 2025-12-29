@@ -59,6 +59,14 @@ impl Default for LinkingState {
     }
 }
 
+static EGUI_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+
+pub fn request_repaint() {
+    if let Some(ctx) = EGUI_CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
 pub struct SignalApp {
     runtime: Arc<Runtime>,
     signal_manager: Arc<RwLock<Option<SignalManager>>>,
@@ -221,6 +229,8 @@ impl SignalApp {
         };
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        
+        let _ = EGUI_CTX.set(cc.egui_ctx.clone());
 
         let mut app = Self {
             runtime,
@@ -245,9 +255,7 @@ impl SignalApp {
         app
     }
 
-    /// Process pending Signal events
     fn process_events(&mut self, ctx: &egui::Context) {
-        // Try to receive events without blocking
         let mut events: Vec<SignalEvent> = Vec::new();
         if let Some(ref mut rx) = *self.event_rx.write() {
             while let Ok(event) = rx.try_recv() {
@@ -305,6 +313,8 @@ impl SignalApp {
             }
             SignalEvent::MessageReceived(incoming) => {
                 self.handle_incoming_message(&incoming);
+                crate::ui::views::chat_list::invalidate_conversations_cache();
+                crate::ui::views::chat_view::invalidate_messages_cache();
             }
             _ => {
                 tracing::debug!("Received event: {:?}", event);
@@ -507,12 +517,7 @@ impl SignalApp {
 
 impl eframe::App for SignalApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Process any pending Signal events
         self.process_events(ctx);
-
-        // Only repaint periodically to check for new events (not every frame)
-        // This reduces CPU usage from 100% to near 0% when idle
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
 
         // Show error toast if present
         let mut dismiss_error = false;

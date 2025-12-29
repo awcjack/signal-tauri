@@ -12,6 +12,16 @@ use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
 use crate::ui::components::emoji_text::show_emoji_text;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static mut CACHED_CONVERSATION_ID: Option<String> = None;
+static mut CACHED_CONVERSATION_NAME: String = String::new();
+static mut CACHED_MESSAGES: Vec<MessageItem> = Vec::new();
+static MESSAGES_DIRTY: AtomicBool = AtomicBool::new(true);
+
+pub fn invalidate_messages_cache() {
+    MESSAGES_DIRTY.store(true, Ordering::SeqCst);
+}
 
 /// Message direction
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -205,6 +215,20 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
 }
 
 fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Vec<MessageItem>) {
+    let cached_id = unsafe { &raw mut CACHED_CONVERSATION_ID };
+    let cached_id = unsafe { &mut *cached_id };
+    let cached_name = unsafe { &raw mut CACHED_CONVERSATION_NAME };
+    let cached_name = unsafe { &mut *cached_name };
+    let cached_messages = unsafe { &raw mut CACHED_MESSAGES };
+    let cached_messages = unsafe { &mut *cached_messages };
+    
+    let conversation_changed = cached_id.as_deref() != Some(conversation_id);
+    let is_dirty = MESSAGES_DIRTY.load(Ordering::SeqCst);
+    
+    if !conversation_changed && !is_dirty {
+        return (cached_name.clone(), cached_messages.clone());
+    }
+    
     if let Some(db) = app.storage().database() {
         let conv_repo = ConversationRepository::new(&*db);
         let msg_repo = MessageRepository::new(&*db);
@@ -222,6 +246,11 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
             .collect();
         messages.reverse();
 
+        *cached_id = Some(conversation_id.to_string());
+        *cached_name = name.clone();
+        *cached_messages = messages.clone();
+        MESSAGES_DIRTY.store(false, Ordering::SeqCst);
+        
         (name, messages)
     } else {
         ("Demo Conversation".to_string(), get_placeholder_messages())
@@ -564,6 +593,9 @@ fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
         conv.update_last_message(text, message.sent_at);
         let _ = conv_repo.save(&conv);
     }
+    
+    invalidate_messages_cache();
+    super::chat_list::invalidate_conversations_cache();
 
     let storage = app.storage().clone();
     let conversation_id = conversation_id.to_string();

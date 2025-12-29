@@ -1,5 +1,12 @@
 //! Signal manager - main interface for Signal protocol operations
 
+macro_rules! send_event {
+    ($tx:expr, $event:expr) => {{
+        let _ = $tx.send($event);
+        crate::app::request_repaint();
+    }};
+}
+
 use crate::signal::provisioning;
 use crate::signal::registration;
 use crate::signal::SignalError;
@@ -171,11 +178,11 @@ impl SignalManager {
                 match Self::perform_linking(&storage, &device_name, event_tx.clone()).await {
                     Ok(()) => {
                         tracing::info!("Device linking completed successfully");
-                        let _ = event_tx.send(SignalEvent::LinkingCompleted);
+                        send_event!(event_tx, SignalEvent::LinkingCompleted);
                     }
                     Err(e) => {
                         tracing::error!("Device linking failed: {}", e);
-                        let _ = event_tx.send(SignalEvent::LinkingFailed(e.to_string()));
+                        send_event!(event_tx, SignalEvent::LinkingFailed(e.to_string()));
                     }
                 }
             });
@@ -230,7 +237,7 @@ impl SignalManager {
         let has_backup_key = provision_msg.ephemeral_backup_key.is_some();
         if has_backup_key {
             tracing::info!("Ephemeral backup key available - message history sync possible!");
-            let _ = event_tx.send(SignalEvent::MessageHistoryAvailable);
+            send_event!(event_tx, SignalEvent::MessageHistoryAvailable);
         } else {
             tracing::info!("No ephemeral backup key - message history sync not available");
         }
@@ -274,7 +281,7 @@ impl SignalManager {
                     }
                     Err(e) => {
                         tracing::error!("Message history sync failed: {}", e);
-                        let _ = event_tx.send(SignalEvent::MessageHistorySyncFailed(e.to_string()));
+                        send_event!(event_tx, SignalEvent::MessageHistorySyncFailed(e.to_string()));
                     }
                 }
             }
@@ -478,8 +485,8 @@ impl SignalManager {
             rt.block_on(async move {
                 if let Err(e) = Self::receive_loop(&storage, event_tx.clone(), send_rx).await {
                     tracing::error!("Message receive loop failed: {}", e);
-                    let _ = event_tx.send(SignalEvent::Error(e.to_string()));
-                    let _ = event_tx.send(SignalEvent::ConnectionStateChanged(ConnectionState::Disconnected));
+                    send_event!(event_tx, SignalEvent::Error(e.to_string()));
+                    send_event!(event_tx, SignalEvent::ConnectionStateChanged(ConnectionState::Disconnected));
                 }
                 
                 let mut guard = SEND_TX.lock();
@@ -512,7 +519,7 @@ impl SignalManager {
             .map_err(|_| SignalError::NotRegistered)?;
 
         tracing::info!("Starting message receive stream...");
-        let _ = event_tx.send(SignalEvent::ConnectionStateChanged(ConnectionState::Connected));
+        send_event!(event_tx, SignalEvent::ConnectionStateChanged(ConnectionState::Connected));
 
         let messages = manager
             .receive_messages()
@@ -527,7 +534,7 @@ impl SignalManager {
                     match received {
                         Some(Received::QueueEmpty) => {
                             tracing::info!("Message queue synchronized");
-                            let _ = event_tx.send(SignalEvent::SyncCompleted);
+                            send_event!(event_tx, SignalEvent::SyncCompleted);
                         }
                         Some(Received::Contacts) => {
                             tracing::info!("Contacts sync signal received, syncing to local database...");
@@ -535,7 +542,7 @@ impl SignalManager {
                                 tracing::error!("Failed to sync contacts to local storage: {}", e);
                             } else {
                                 tracing::info!("Contacts synced to local database");
-                                let _ = event_tx.send(SignalEvent::ContactUpdated { contact_id: "all".to_string() });
+                                send_event!(event_tx, SignalEvent::ContactUpdated { contact_id: "all".to_string() });
                                 
                                 if let Err(e) = crate::signal::profiles::update_conversations_from_contacts(storage) {
                                     tracing::warn!("Failed to update conversations from contacts: {}", e);
@@ -549,7 +556,7 @@ impl SignalManager {
                                             if let Err(e) = crate::signal::profiles::update_conversations_from_contacts(storage) {
                                                 tracing::warn!("Failed to update conversations after avatar sync: {}", e);
                                             }
-                                            let _ = event_tx.send(SignalEvent::ContactUpdated { contact_id: "avatars".to_string() });
+                                            send_event!(event_tx, SignalEvent::ContactUpdated { contact_id: "avatars".to_string() });
                                         }
                                     }
                                     Err(e) => {
@@ -562,7 +569,7 @@ impl SignalManager {
                             Self::log_content_verbose(&content);
                             if let Some(incoming) = Self::process_content(&content) {
                                 tracing::info!("Received message from {}", incoming.sender);
-                                let _ = event_tx.send(SignalEvent::MessageReceived(incoming));
+                                send_event!(event_tx, SignalEvent::MessageReceived(incoming));
                             }
                         }
                         None => {
@@ -590,7 +597,7 @@ impl SignalManager {
             }
         }
 
-        let _ = event_tx.send(SignalEvent::ConnectionStateChanged(ConnectionState::Disconnected));
+        send_event!(event_tx, SignalEvent::ConnectionStateChanged(ConnectionState::Disconnected));
 
         Ok(())
     }
@@ -954,11 +961,11 @@ impl SignalManager {
                 }).await {
                     Ok(()) => {
                         tracing::info!("Message {} sent successfully", msg_id);
-                        let _ = event_tx.send(SignalEvent::MessageSent { message_id: msg_id });
+                        send_event!(event_tx, SignalEvent::MessageSent { message_id: msg_id });
                     }
                     Err(e) => {
                         tracing::error!("Failed to send message {}: {}", msg_id, e);
-                        let _ = event_tx.send(SignalEvent::Error(format!("Send failed: {}", e)));
+                        send_event!(event_tx, SignalEvent::Error(format!("Send failed: {}", e)));
                     }
                 }
             });
@@ -997,11 +1004,11 @@ impl SignalManager {
                 }).await {
                     Ok(()) => {
                         tracing::info!("Group message {} sent successfully", msg_id);
-                        let _ = event_tx.send(SignalEvent::MessageSent { message_id: msg_id });
+                        send_event!(event_tx, SignalEvent::MessageSent { message_id: msg_id });
                     }
                     Err(e) => {
                         tracing::error!("Failed to send group message {}: {}", msg_id, e);
-                        let _ = event_tx.send(SignalEvent::Error(format!("Send failed: {}", e)));
+                        send_event!(event_tx, SignalEvent::Error(format!("Send failed: {}", e)));
                     }
                 }
             });

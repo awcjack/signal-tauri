@@ -243,10 +243,44 @@ impl<'a> ConversationRepository<'a> {
     }
 
     pub fn list_active(&self) -> Vec<Conversation> {
-        self.list()
-            .into_iter()
-            .filter(|c| !c.is_archived && c.last_message.is_some())
-            .collect()
+        let conn = self.db.connection();
+        let conn = conn.lock().unwrap();
+        
+        let mut stmt = match conn.prepare(
+            "SELECT c.id, c.conversation_type, c.name, c.avatar_path, c.last_message, 
+                    c.last_message_at, c.unread_count, c.is_pinned, c.is_muted, c.muted_until,
+                    c.is_archived, c.is_blocked, c.disappearing_timer, c.draft, c.created_at, c.updated_at
+             FROM conversations c
+             WHERE c.is_archived = 0
+               AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+             ORDER BY c.is_pinned DESC, c.updated_at DESC"
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        stmt.query_map([], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                conversation_type: ConversationType::from_str(&row.get::<_, String>(1)?),
+                name: row.get(2)?,
+                avatar_path: row.get(3)?,
+                last_message: row.get(4)?,
+                last_message_at: row.get::<_, Option<i64>>(5)?.map(|t| Utc.timestamp_opt(t, 0).unwrap()),
+                unread_count: row.get::<_, i64>(6)? as u32,
+                is_pinned: row.get::<_, i64>(7)? != 0,
+                is_muted: row.get::<_, i64>(8)? != 0,
+                muted_until: row.get::<_, Option<i64>>(9)?.map(|t| Utc.timestamp_opt(t, 0).unwrap()),
+                is_archived: row.get::<_, i64>(10)? != 0,
+                is_blocked: row.get::<_, i64>(11)? != 0,
+                disappearing_messages_timer: row.get::<_, i64>(12)? as u32,
+                draft: row.get(13)?,
+                created_at: Utc.timestamp_opt(row.get::<_, i64>(14)?, 0).unwrap(),
+                updated_at: Utc.timestamp_opt(row.get::<_, i64>(15)?, 0).unwrap(),
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
     pub fn list_archived(&self) -> Vec<Conversation> {

@@ -316,6 +316,11 @@ impl SignalApp {
                 crate::ui::views::chat_list::invalidate_conversations_cache();
                 crate::ui::views::chat_view::invalidate_messages_cache();
             }
+            SignalEvent::ContactUpdated { contact_id } => {
+                tracing::info!("Contact updated: {}, invalidating caches", contact_id);
+                crate::ui::views::chat_list::invalidate_conversations_cache();
+                crate::ui::views::chat_list::invalidate_contacts_cache();
+            }
             _ => {
                 tracing::debug!("Received event: {:?}", event);
             }

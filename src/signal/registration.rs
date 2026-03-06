@@ -4,15 +4,15 @@
 //! the full provision message (including ephemeral_backup_key).
 
 use presage::libsignal_service::{
-    configuration::{ServiceConfiguration, SignalServers},
-    pre_keys::{KyberPreKeyStoreExt, PreKeysStore},
+    configuration::SignalServers,
+    pre_keys::PreKeysStore,
     prelude::phonenumber::PhoneNumber,
     proto::DeviceName,
     push_service::{
-        DeviceActivationRequest, HttpAuth, LinkAccountAttributes, 
-        LinkCapabilities, LinkRequest, LinkResponse, PushService, ServiceIds,
+        HttpAuth, PushService, ServiceIds,
+        linking::{LinkAccountAttributes, LinkCapabilities, LinkRequest, LinkResponse},
     },
-    utils::BASE64_RELAXED,
+    websocket::registration::DeviceActivationRequest,
     zkgroup::profiles::ProfileKey,
 };
 use presage::libsignal_service::protocol::{
@@ -32,6 +32,13 @@ use std::time::SystemTime;
 
 use crate::signal::provisioning::FullProvisionMessage;
 use crate::signal::SignalError;
+
+/// Base64 engine with relaxed padding requirements
+const BASE64_RELAXED: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
 
 type Aes256Ctr128BE = ctr::Ctr128BE<aes::Aes256>;
 type HmacSha256 = Hmac<Sha256>;
@@ -214,8 +221,7 @@ pub async fn complete_registration(
     };
     
     // Create push service and call link API
-    let service_configuration: ServiceConfiguration = signal_servers.into();
-    let mut push_service = PushService::new(service_configuration, None, "signal-tauri");
+    let mut push_service = PushService::new(signal_servers, None, "signal-tauri");
     
     let http_auth = HttpAuth {
         username: provision_msg.phone_number.clone(),
@@ -238,29 +244,35 @@ pub async fn complete_registration(
         .map_err(|e| SignalError::StorageError(format!("Failed to save PNI identity: {:?}", e)))?;
     
     tracing::info!("Identity keys saved to store");
-    
-    let mut signaling_key = [0u8; 52];
-    rng.fill_bytes(&mut signaling_key);
-    
+
     let phone_number: PhoneNumber = provision_msg.phone_number.parse()
         .map_err(|e| SignalError::ProtocolError(format!("Invalid phone number: {:?}", e)))?;
-    
+
+    // Convert DeviceId to u32
+    let device_id_u32: u32 = device_id.into();
+
     // RegistrationData has pub(crate) fields, so we construct via JSON deserialization
-    let reg_data_json = serde_json::json!({
+    // NOTE: signaling_key was removed in newer presage versions
+    // We use serde_json::to_string + from_str instead of json! + from_value because
+    // the profile_key deserializer expects &str, not owned String from Value
+    let reg_data_value = serde_json::json!({
         "signal_servers": signal_servers,
         "device_name": device_name,
         "phone_number": phone_number,
         "uuid": aci.to_string(),
         "pni": pni.to_string(),
         "password": password,
-        "signaling_key": BASE64_RELAXED.encode(&signaling_key),
-        "device_id": device_id,
+        "device_id": device_id_u32,
         "registration_id": registration_id,
         "pni_registration_id": pni_registration_id,
         "profile_key": base64::engine::general_purpose::STANDARD.encode(&profile_key_bytes),
     });
-    
-    let registration_data: RegistrationData = serde_json::from_value(reg_data_json)
+
+    // Convert to string then deserialize to satisfy &str lifetime requirements
+    let reg_data_json_str = serde_json::to_string(&reg_data_value)
+        .map_err(|e| SignalError::StorageError(format!("Failed to serialize registration data: {:?}", e)))?;
+
+    let registration_data: RegistrationData = serde_json::from_str(&reg_data_json_str)
         .map_err(|e| SignalError::StorageError(format!("Failed to create registration data: {:?}", e)))?;
     
     store.save_registration_data(&registration_data).await
@@ -270,7 +282,7 @@ pub async fn complete_registration(
     
     Ok(RegistrationResult {
         phone_number: provision_msg.phone_number.clone(),
-        device_id: device_id.into(),
+        device_id: device_id_u32,
         registration_id,
         pni_registration_id,
         aci,

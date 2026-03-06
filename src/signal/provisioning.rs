@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use presage::libsignal_service::{
-    configuration::{SignalServers, ServiceConfiguration},
-    proto::{ProvisionEnvelope, ProvisioningAddress, 
+    configuration::SignalServers,
+    proto::{ProvisionEnvelope, ProvisioningAddress,
             web_socket_message, WebSocketMessage, WebSocketRequestMessage, WebSocketResponseMessage},
     provisioning::ProvisioningCipher,
     push_service::PushService,
@@ -102,8 +102,7 @@ pub async fn run_provisioning_capture<F>(
 where
     F: FnOnce(Url),
 {
-    let service_configuration: ServiceConfiguration = signal_servers.into();
-    let push_service = PushService::new(service_configuration, None, "signal-tauri");
+    let push_service = PushService::new(signal_servers, None, "signal-tauri");
     
     let ws_url = build_provisioning_ws_url(&push_service)?;
     

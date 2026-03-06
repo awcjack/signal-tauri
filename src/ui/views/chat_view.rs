@@ -177,7 +177,7 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
     let conversation_id = conversation_id.unwrap();
     let (conversation_name, messages) = load_conversation_data(app, conversation_id);
 
-    show_conversation_header(ui, &conversation_name);
+    show_conversation_header(ui, app, conversation_id, &conversation_name);
 
     let available_height = ui.available_height() - 60.0;
 
@@ -276,7 +276,7 @@ fn show_empty_state(ui: &mut egui::Ui) {
     });
 }
 
-fn show_conversation_header(ui: &mut egui::Ui, name: &str) {
+fn show_conversation_header(ui: &mut egui::Ui, app: &SignalApp, conversation_id: &str, name: &str) {
     let header_height = 56.0;
 
     ui.horizontal(|ui| {
@@ -284,8 +284,8 @@ fn show_conversation_header(ui: &mut egui::Ui, name: &str) {
         ui.add_space(8.0);
 
         let avatar_size = 40.0;
-        let (avatar_rect, _) = ui.allocate_exact_size(Vec2::splat(avatar_size), Sense::hover());
 
+        // Get avatar from cache or show initials
         let avatar_color = {
             let hash: u32 = name.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
             let colors = [
@@ -297,8 +297,6 @@ fn show_conversation_header(ui: &mut egui::Ui, name: &str) {
             colors[(hash as usize) % colors.len()]
         };
 
-        ui.painter().circle_filled(avatar_rect.center(), avatar_size / 2.0, avatar_color);
-
         let initials: String = name
             .split_whitespace()
             .take(2)
@@ -306,12 +304,23 @@ fn show_conversation_header(ui: &mut egui::Ui, name: &str) {
             .collect::<String>()
             .to_uppercase();
 
-        ui.painter().text(
-            avatar_rect.center(),
-            egui::Align2::CENTER_CENTER,
+        // Try to load avatar from cache
+        let avatar_path = if let Some(db) = app.storage().database() {
+            use crate::storage::conversations::ConversationRepository;
+            let conv_repo = ConversationRepository::new(&*db);
+            conv_repo.get(conversation_id).and_then(|conv| conv.avatar_path)
+        } else {
+            None
+        };
+
+        crate::ui::avatar_cache::draw_avatar(
+            ui,
+            app.avatar_cache(),
+            conversation_id,
+            avatar_path.as_deref(),
             &initials,
-            egui::FontId::proportional(14.0),
-            Color32::WHITE,
+            avatar_color,
+            avatar_size,
         );
 
         ui.add_space(12.0);
@@ -363,7 +372,12 @@ fn show_date_separator(ui: &mut egui::Ui, date: &DateTime<Utc>) {
         let available_width = ui.available_width();
         let text = format_date(date);
 
-        ui.add_space(available_width / 2.0 - 50.0);
+        // Calculate text width approximately (12pt font, ~7px per char)
+        let approx_text_width = text.len() as f32 * 7.0;
+
+        // Center the text, with minimum spacing of 12px
+        let spacing = ((available_width - approx_text_width) / 2.0).max(12.0);
+        ui.add_space(spacing);
 
         ui.label(
             egui::RichText::new(text)
@@ -392,7 +406,11 @@ fn format_date(date: &DateTime<Utc>) -> String {
 /// Show a single message
 fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
     let is_sent = msg.direction == MessageDirection::Sent;
-    let max_width = ui.available_width() * 0.7;
+
+    // Cache available width before any allocation
+    let total_width = ui.available_width();
+    let max_width = total_width * 0.7;
+
     let bubble_color = if is_sent {
         SignalColors::BUBBLE_SENT
     } else {
@@ -401,7 +419,10 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
 
     ui.horizontal(|ui| {
         if is_sent {
-            ui.add_space(ui.available_width() - max_width - 20.0);
+            // Calculate spacing to right-align the bubble
+            // Use cached total_width to ensure proper calculation
+            let spacing = (total_width - max_width - 20.0).max(12.0);
+            ui.add_space(spacing);
         } else {
             ui.add_space(12.0);
         }

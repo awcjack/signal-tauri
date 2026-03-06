@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     // Configure native options
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Signal")
+            .with_title("Signal-Tauri DEV")
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([800.0, 600.0])
             .with_icon(load_icon()),
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
 
     // Run the application
     eframe::run_native(
-        "Signal",
+        "Signal-Tauri DEV",
         native_options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);

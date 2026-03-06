@@ -6,11 +6,101 @@ use crate::storage::conversations::{ConversationRepository, ConversationType};
 use crate::storage::Storage;
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::manager::Registered;
+use presage::store::ContentsStore;
 use presage::Manager;
 use presage_store_sqlite::SqliteStore;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// Syncs profile keys for all contacts from presage store
+/// This must be called BEFORE sync_contact_avatars to populate the profile keys
+pub async fn sync_contact_profile_keys(
+    presage_store: &SqliteStore,
+    storage: &Arc<Storage>,
+) -> Result<usize, SignalError> {
+    let db = storage
+        .database()
+        .ok_or_else(|| SignalError::StorageError("App database not available".to_string()))?;
+
+    let repo = ContactRepository::new(&db);
+    let mut updated_count = 0;
+
+    // Get all contacts from presage store
+    let presage_contacts: Vec<_> = presage_store
+        .contacts()
+        .await
+        .map_err(|e| {
+            SignalError::StorageError(format!("Failed to get contacts from presage: {:?}", e))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    tracing::info!(
+        "Checking {} contacts for profile key updates",
+        presage_contacts.len()
+    );
+
+    for presage_contact in presage_contacts {
+        let uuid_str = presage_contact.uuid.to_string();
+
+        // Only process if presage has a valid profile key
+        if presage_contact.profile_key.is_empty() || presage_contact.profile_key.len() != 32 {
+            tracing::debug!("Skipping contact {} - no valid profile key", uuid_str);
+            continue;
+        }
+
+        // Get or create contact
+        let mut contact = repo.get_by_uuid(&uuid_str).unwrap_or_else(|| {
+            crate::storage::contacts::StoredContact {
+                id: uuid_str.clone(),
+                uuid: uuid_str.clone(),
+                phone_number: presage_contact.phone_number.as_ref().map(|p| p.to_string()),
+                name: presage_contact.name.clone(),
+                profile_name: if presage_contact.name.is_empty() {
+                    None
+                } else {
+                    Some(presage_contact.name.clone())
+                },
+                avatar_path: None,
+                profile_key: None,
+                is_blocked: false,
+                is_verified: false,
+                created_at: chrono::Utc::now().timestamp(),
+                updated_at: chrono::Utc::now().timestamp(),
+            }
+        });
+
+        // Update profile key if missing or different
+        let needs_update = contact.profile_key.is_none()
+            || contact
+                .profile_key
+                .as_ref()
+                .map(|k| k != &presage_contact.profile_key)
+                .unwrap_or(true);
+
+        if needs_update {
+            contact.profile_key = Some(presage_contact.profile_key.clone());
+            contact.name = presage_contact.name.clone();
+            contact.profile_name = if presage_contact.name.is_empty() {
+                None
+            } else {
+                Some(presage_contact.name)
+            };
+            contact.updated_at = chrono::Utc::now().timestamp();
+
+            if let Err(e) = repo.save(&contact) {
+                tracing::warn!("Failed to update contact {}: {}", uuid_str, e);
+            } else {
+                updated_count += 1;
+                tracing::debug!("Updated profile key for contact {}", uuid_str);
+            }
+        }
+    }
+
+    tracing::info!("Updated {} contacts with profile keys", updated_count);
+    Ok(updated_count)
+}
 
 pub async fn fetch_and_save_avatar(
     manager: &mut Manager<SqliteStore, Registered>,

@@ -534,6 +534,38 @@ impl SignalManager {
                     match received {
                         Some(Received::QueueEmpty) => {
                             tracing::info!("Message queue synchronized");
+
+                            // Sync profile keys and avatars on startup
+                            tracing::info!("Checking for profile key updates...");
+                            match crate::signal::profiles::sync_contact_profile_keys(manager.store(), storage).await {
+                                Ok(count) if count > 0 => {
+                                    tracing::info!("Updated {} contacts with profile keys", count);
+
+                                    // Now sync avatars for contacts with profile keys
+                                    tracing::info!("Starting avatar sync...");
+                                    match crate::signal::profiles::sync_contact_avatars(&mut manager, storage).await {
+                                        Ok(avatar_count) => {
+                                            tracing::info!("Synced {} avatars", avatar_count);
+                                            if avatar_count > 0 {
+                                                if let Err(e) = crate::signal::profiles::update_conversations_from_contacts(storage) {
+                                                    tracing::warn!("Failed to update conversations after avatar sync: {}", e);
+                                                }
+                                                send_event!(event_tx, SignalEvent::ContactUpdated { contact_id: "avatars".to_string() });
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Avatar sync failed: {}", e);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    tracing::debug!("No profile key updates needed");
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Profile key sync failed: {}", e);
+                                }
+                            }
+
                             send_event!(event_tx, SignalEvent::SyncCompleted);
                         }
                         Some(Received::Contacts) => {
@@ -543,11 +575,23 @@ impl SignalManager {
                             } else {
                                 tracing::info!("Contacts synced to local database");
                                 send_event!(event_tx, SignalEvent::ContactUpdated { contact_id: "all".to_string() });
-                                
+
                                 if let Err(e) = crate::signal::profiles::update_conversations_from_contacts(storage) {
                                     tracing::warn!("Failed to update conversations from contacts: {}", e);
                                 }
-                                
+
+                                // First, sync profile keys from presage store
+                                tracing::info!("Syncing profile keys from presage store...");
+                                match crate::signal::profiles::sync_contact_profile_keys(manager.store(), storage).await {
+                                    Ok(count) => {
+                                        tracing::info!("Profile key sync complete: {} contacts updated", count);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Profile key sync failed: {}", e);
+                                    }
+                                }
+
+                                // Then sync avatars (now that profile keys are populated)
                                 tracing::info!("Starting avatar sync for contacts...");
                                 match crate::signal::profiles::sync_contact_avatars(&mut manager, storage).await {
                                     Ok(count) => {

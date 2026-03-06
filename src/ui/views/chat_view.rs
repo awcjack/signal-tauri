@@ -597,21 +597,34 @@ fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
     invalidate_messages_cache();
     super::chat_list::invalidate_conversations_cache();
 
+    // Get conversation type from database to determine if it's a group
+    let is_group = conv_repo.get(conversation_id)
+        .map(|conv| conv.conversation_type == crate::storage::conversations::ConversationType::Group)
+        .unwrap_or(false);
+
     let storage = app.storage().clone();
     let conversation_id = conversation_id.to_string();
     let text = text.to_string();
     let text_for_log = text.clone();
-    let is_group = !conversation_id.starts_with('<');
-    
+
+    // Validate conversation ID format before attempting to send
+    if is_group && !is_valid_base64_group_id(&conversation_id) {
+        tracing::error!(
+            "Invalid group ID format: {}. Group IDs must be 32-byte base64 encoded master keys.",
+            conversation_id
+        );
+        return;
+    }
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("Failed to create runtime for sending");
-        
+
         rt.block_on(async move {
             use crate::signal::manager::SignalManager;
-            
+
             if is_group {
                 match SignalManager::send_group_message_static(&storage, &conversation_id, &text).await {
                     Ok(()) => tracing::info!("Group message sent"),
@@ -628,6 +641,20 @@ fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
     });
 
     tracing::info!("Queued message for sending: {}", text_for_log);
+}
+
+/// Validate if a conversation ID is a valid base64-encoded group ID
+/// Group master keys are 32 bytes when decoded from base64
+fn is_valid_base64_group_id(id: &str) -> bool {
+    use base64::Engine;
+
+    // Try to decode as base64
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(id) {
+        // Group master keys should be exactly 32 bytes
+        bytes.len() == 32
+    } else {
+        false
+    }
 }
 
 /// Format file size for display

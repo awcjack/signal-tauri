@@ -7,6 +7,10 @@ description = "A native Rust Signal Desktop client using egui"
 license = "AGPL-3.0"
 repository = "https://github.com/user/signal-tauri"
 
+[[bin]]
+name = "cleanup"
+path = "cleanup_conversations.rs"
+
 [dependencies]
 # UI Framework
 eframe = { version = "0.29", default-features = false, features = [
@@ -19,8 +23,13 @@ egui_extras = { version = "0.29", features = ["image", "svg"] }
 egui-twemoji = "0.5"
 
 # Signal Protocol
-presage = { git = "https://github.com/whisperfish/presage", rev = "66b56a77" }
-presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "66b56a77" }
+# Updated to latest version (March 4, 2026) for:
+# - Signal Desktop 8.0 compatibility (binary service IDs)
+# - Critical deadlock fix in backpressure handling
+# - HTTP 422 message reception fix
+# - CDSI integration for improved contact sync
+presage = { git = "https://github.com/whisperfish/presage", rev = "20d39de1" }
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "20d39de1" }
 
 # Async Runtime
 tokio = { version = "1", features = ["full"] }
@@ -58,7 +67,7 @@ reqwest-websocket = "0.4"
 
 # Protocol buffers for Signal protocol
 prost = "0.13"
-bytes = "1"
+bytes = "1.11.1"  # Updated to match presage requirement
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
@@ -93,7 +102,8 @@ getrandom = "0.3"
 
 # SQLite database for app data (messages, conversations, settings)
 # Using SQLCipher for at-rest encryption
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
+# Using whisperfish fork to match presage-store-sqlite requirements (patched below)
+rusqlite = { git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc", features = ["bundled-sqlcipher"] }
 keyring = "3"
 argon2 = "0.5"
 unicode-segmentation = "1.12.0"
@@ -114,8 +124,12 @@ opt-level = 3
 
 # Patch crates-io dependencies to use Signal's fork
 # This resolves version conflicts between curve25519-dalek and curve25519-dalek-signal
+# Also patches rusqlite and libsqlite3-sys to use whisperfish fork with bundled-sqlcipher-custom-crypto feature
+# Required by presage-store-sqlite for encrypted database support
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
+rusqlite = { git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc" }
+libsqlite3-sys = { git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc" }
 
 [dev-dependencies]
 tempfile = "3.24.0"

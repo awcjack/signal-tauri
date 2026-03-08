@@ -91,6 +91,10 @@ hex = "0.4"
 # Clipboard
 arboard = "3"
 
+# macOS dock icon support - fruitbasket provides runtime app bundle trampoline
+[target.'cfg(target_os = "macos")'.dependencies]
+fruitbasket = "0.10"
+
 # Random number generation
 rand = "0.9"
 

@@ -18,6 +18,27 @@ use anyhow::Result;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 fn main() -> Result<()> {
+    // macOS: Create a runtime app bundle trampoline so the app appears in the Dock
+    // This is necessary because macOS only shows apps in the Dock if they're running
+    // from a proper .app bundle. The trampoline creates a temporary bundle at runtime.
+    #[cfg(target_os = "macos")]
+    {
+        use fruitbasket::ActivationPolicy;
+        use fruitbasket::Trampoline;
+        use fruitbasket::FruitApp;
+
+        // Build the trampoline - this will relaunch the app from a bundle if needed
+        let _ = Trampoline::new("Signal-Tauri", "signal-tauri", "com.signal-tauri.dev")
+            .version(env!("CARGO_PKG_VERSION"))
+            .plist_key("LSUIElement", "NO")  // Show in Dock
+            .build(fruitbasket::InstallDir::Temp)
+            .ok();
+
+        // Create FruitApp instance and set activation policy
+        let app = FruitApp::new();
+        app.set_activation_policy(ActivationPolicy::Regular);
+    }
+
     // Initialize logging
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -34,7 +55,9 @@ fn main() -> Result<()> {
             .with_title("Signal-Tauri DEV")
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_icon(load_icon()),
+            .with_icon(load_icon())
+            .with_taskbar(true) // Show in taskbar/dock
+            .with_active(true), // Ensure window is active and focused
         vsync: true,
         ..Default::default()
     };

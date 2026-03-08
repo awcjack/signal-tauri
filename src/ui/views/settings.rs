@@ -1,6 +1,8 @@
 //! Settings view
 
 use crate::app::SignalApp;
+use crate::storage::contacts::ContactRepository;
+use crate::storage::conversations::{ConversationRepository, ConversationType};
 use crate::ui::theme::SignalColors;
 use egui::{Color32, Vec2};
 
@@ -23,34 +25,97 @@ impl Default for SettingsCategory {
     }
 }
 
+/// Cached profile info to avoid DB lookups every frame
+struct ProfileInfo {
+    display_name: String,
+    phone_number: String,
+    initials: String,
+}
+
+fn load_profile_info(app: &SignalApp) -> ProfileInfo {
+    let phone_number = app.storage().get_phone_number().unwrap_or_default();
+
+    // Try to find user's display name from NoteToSelf conversation or contacts
+    let display_name = if let Some(db) = app.storage().database() {
+        let conv_repo = ConversationRepository::new(&*db);
+        let contact_repo = ContactRepository::new(&*db);
+
+        // First: look for NoteToSelf conversation (the user's own conversation)
+        let note_to_self_name = conv_repo.list().into_iter()
+            .find(|c| c.conversation_type == ConversationType::NoteToSelf)
+            .and_then(|c| {
+                // The NoteToSelf conv ID is the user's own UUID — try to find their contact
+                contact_repo.get_by_uuid(&c.id)
+                    .map(|contact| contact.display_name().to_string())
+                    .filter(|name| name != &c.id && !name.starts_with("Aci("))
+            });
+
+        if let Some(name) = note_to_self_name {
+            name
+        } else if !phone_number.is_empty() {
+            phone_number.clone()
+        } else {
+            String::new()
+        }
+    } else if !phone_number.is_empty() {
+        phone_number.clone()
+    } else {
+        String::new()
+    };
+
+    let initials = if display_name.is_empty() {
+        "?".to_string()
+    } else {
+        display_name
+            .split_whitespace()
+            .take(2)
+            .filter_map(|w| w.chars().next())
+            .collect::<String>()
+            .to_uppercase()
+    };
+
+    ProfileInfo {
+        display_name,
+        phone_number,
+        initials,
+    }
+}
+
 /// Show the settings view
 pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            // Back button
-            if ui.button("← Back").clicked() {
-                // Navigate back to chat list
-            }
-            ui.heading("Settings");
-        });
+    let mut go_back = false;
 
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            // Settings sidebar
-            egui::SidePanel::left("settings_sidebar")
-                .resizable(false)
-                .default_width(200.0)
-                .show_inside(ui, |ui| {
-                    show_settings_sidebar(ui);
-                });
-
-            // Settings content
-            ui.vertical(|ui| {
-                show_settings_content(ui);
+    // Top bar with back button
+    egui::TopBottomPanel::top("settings_top_bar")
+        .exact_height(48.0)
+        .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(8.0);
+                if ui.button("← Back").clicked() {
+                    go_back = true;
+                }
+                ui.heading("Settings");
             });
         });
+
+    // Left sidebar panel
+    egui::SidePanel::left("settings_sidebar")
+        .resizable(false)
+        .default_width(200.0)
+        .show(ctx, |ui| {
+            ui.add_space(8.0);
+            show_settings_sidebar(ui);
+        });
+
+    // Main content area
+    let profile = load_profile_info(app);
+    egui::CentralPanel::default().show(ctx, |ui| {
+        show_profile_settings(ui, &profile);
     });
+
+    if go_back {
+        app.navigate_to_chat_list();
+    }
 }
 
 fn show_settings_sidebar(ui: &mut egui::Ui) {
@@ -65,25 +130,18 @@ fn show_settings_sidebar(ui: &mut egui::Ui) {
         ("❓", "Help", SettingsCategory::Help),
     ];
 
-    ui.vertical(|ui| {
-        for (icon, label, _category) in &categories {
-            let button = ui.add(
-                egui::Button::new(format!("{} {}", icon, label))
-                    .min_size(Vec2::new(180.0, 36.0))
-            );
-            if button.clicked() {
-                // Set selected category
-            }
+    for (icon, label, _category) in &categories {
+        let button = ui.add(
+            egui::Button::new(format!("{} {}", icon, label))
+                .min_size(Vec2::new(180.0, 36.0))
+        );
+        if button.clicked() {
+            // Set selected category
         }
-    });
+    }
 }
 
-fn show_settings_content(ui: &mut egui::Ui) {
-    // Profile settings (default view)
-    show_profile_settings(ui);
-}
-
-fn show_profile_settings(ui: &mut egui::Ui) {
+fn show_profile_settings(ui: &mut egui::Ui, profile: &ProfileInfo) {
     ui.heading("Profile");
     ui.add_space(16.0);
 
@@ -100,7 +158,7 @@ fn show_profile_settings(ui: &mut egui::Ui) {
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "YN",
+            &profile.initials,
             egui::FontId::proportional(28.0),
             Color32::WHITE,
         );
@@ -111,11 +169,17 @@ fn show_profile_settings(ui: &mut egui::Ui) {
 
         ui.vertical(|ui| {
             ui.add_space(16.0);
-            ui.label(egui::RichText::new("Your Name").size(20.0).strong());
-            ui.label(egui::RichText::new("+1 234 567 8900").color(SignalColors::TEXT_SECONDARY));
+            if profile.display_name.is_empty() {
+                ui.label(egui::RichText::new("No profile name").size(20.0).strong().color(SignalColors::TEXT_SECONDARY));
+            } else {
+                ui.label(egui::RichText::new(&profile.display_name).size(20.0).strong());
+            }
+            if !profile.phone_number.is_empty() {
+                ui.label(egui::RichText::new(&profile.phone_number).color(SignalColors::TEXT_SECONDARY));
+            }
             ui.add_space(8.0);
             if ui.button("Edit Profile").clicked() {
-                // Open profile editor
+                tracing::info!("Edit Profile: not yet implemented");
             }
         });
     });
@@ -124,33 +188,30 @@ fn show_profile_settings(ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(16.0);
 
-    // Name
+    // Name (read-only display)
     ui.horizontal(|ui| {
         ui.label("Name:");
-        ui.add_space(ui.available_width() - 250.0);
-        let mut name = "Your Name".to_string();
-        ui.add(egui::TextEdit::singleline(&mut name).desired_width(200.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if profile.display_name.is_empty() {
+                ui.label(egui::RichText::new("Not set").color(SignalColors::TEXT_TERTIARY));
+            } else {
+                ui.label(&profile.display_name);
+            }
+        });
     });
 
     ui.add_space(12.0);
 
-    // About
-    ui.horizontal(|ui| {
-        ui.label("About:");
-        ui.add_space(ui.available_width() - 250.0);
-        let mut about = "Available".to_string();
-        ui.add(egui::TextEdit::singleline(&mut about).desired_width(200.0));
-    });
-
-    ui.add_space(24.0);
-    ui.separator();
-    ui.add_space(16.0);
-
     // Phone number (read-only)
     ui.horizontal(|ui| {
         ui.label("Phone Number:");
-        ui.add_space(ui.available_width() - 250.0);
-        ui.label(egui::RichText::new("+1 234 567 8900").color(SignalColors::TEXT_SECONDARY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if profile.phone_number.is_empty() {
+                ui.label(egui::RichText::new("Not available").color(SignalColors::TEXT_TERTIARY));
+            } else {
+                ui.label(egui::RichText::new(&profile.phone_number).color(SignalColors::TEXT_SECONDARY));
+            }
+        });
     });
 }
 

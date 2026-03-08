@@ -13,6 +13,7 @@ static mut SHOW_CONTACT_PICKER: bool = false;
 static mut CONTACT_SEARCH: String = String::new();
 static mut CACHED_CONVERSATIONS: Vec<ConversationItem> = Vec::new();
 static mut CACHED_CONTACTS: Vec<StoredContact> = Vec::new();
+static mut MARK_READ_REQUEST: Option<String> = None;
 static CONVERSATIONS_DIRTY: AtomicBool = AtomicBool::new(true);
 static CONTACTS_DIRTY: AtomicBool = AtomicBool::new(true);
 
@@ -135,6 +136,13 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
                     });
                 }
             });
+    }
+
+    // Process pending mark-read requests from context menu
+    let mark_read = unsafe { &raw mut MARK_READ_REQUEST };
+    let mark_read = unsafe { &mut *mark_read };
+    if let Some(conv_id) = mark_read.take() {
+        app.mark_conversation_read(&conv_id);
     }
 
     if let Some(id) = new_selection {
@@ -517,6 +525,9 @@ fn show_conversation_item(
             ui.close_menu();
         }
         if ui.button("Mark as read").clicked() {
+            let mark_read = unsafe { &raw mut MARK_READ_REQUEST };
+            let mark_read = unsafe { &mut *mark_read };
+            *mark_read = Some(conv.id.clone());
             ui.close_menu();
         }
         ui.separator();

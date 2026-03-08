@@ -190,7 +190,12 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
     }
 
     let conversation_id = conversation_id.unwrap();
-    let (conversation_name, messages) = load_conversation_data(app, conversation_id);
+    let (conversation_name, unread_count, messages) = load_conversation_data(app, conversation_id);
+
+    // Mark read if new messages arrived while this conversation is open
+    if unread_count > 0 {
+        app.mark_conversation_read(conversation_id);
+    }
 
     show_conversation_header(ui, app, conversation_id, &conversation_name);
 
@@ -229,7 +234,7 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
     show_message_input(app, ui, conversation_id);
 }
 
-fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Vec<MessageItem>) {
+fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, u32, Vec<MessageItem>) {
     let cached_id = unsafe { &raw mut CACHED_CONVERSATION_ID };
     let cached_id = unsafe { &mut *cached_id };
     let cached_name = unsafe { &raw mut CACHED_CONVERSATION_NAME };
@@ -241,7 +246,7 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
     let is_dirty = MESSAGES_DIRTY.load(Ordering::SeqCst);
 
     if !conversation_changed && !is_dirty {
-        return (cached_name.clone(), cached_messages.clone());
+        return (cached_name.clone(), 0, cached_messages.clone());
     }
 
     if let Some(db) = app.storage().database() {
@@ -252,6 +257,9 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
         let name = conversation.as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
+        let unread_count = conversation.as_ref()
+            .map(|c| c.unread_count)
+            .unwrap_or(0);
 
         // Determine if this is a group conversation for sender name display
         let is_group = conversation.as_ref()
@@ -271,9 +279,9 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
         *cached_messages = messages.clone();
         MESSAGES_DIRTY.store(false, Ordering::SeqCst);
 
-        (name, messages)
+        (name, unread_count, messages)
     } else {
-        ("Demo Conversation".to_string(), get_placeholder_messages())
+        ("Demo Conversation".to_string(), 0, get_placeholder_messages())
     }
 }
 

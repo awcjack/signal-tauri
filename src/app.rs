@@ -538,6 +538,84 @@ impl SignalApp {
         self.initialized = false;
         *self.signal_manager.write() = None;
     }
+
+    pub fn toggle_pin_conversation(&self, conversation_id: &str) {
+        let Some(db) = self.storage.database() else {
+            return;
+        };
+        let conv_repo = ConversationRepository::new(&*db);
+        if let Some(mut conv) = conv_repo.get(conversation_id) {
+            conv.is_pinned = !conv.is_pinned;
+            conv.updated_at = Utc::now();
+            if let Err(e) = conv_repo.save(&conv) {
+                tracing::error!("Failed to toggle pin: {}", e);
+            }
+            crate::ui::views::chat_list::invalidate_conversations_cache();
+        }
+    }
+
+    pub fn toggle_mute_conversation(&self, conversation_id: &str) {
+        let Some(db) = self.storage.database() else {
+            return;
+        };
+        let conv_repo = ConversationRepository::new(&*db);
+        if let Some(mut conv) = conv_repo.get(conversation_id) {
+            conv.is_muted = !conv.is_muted;
+            if !conv.is_muted {
+                conv.muted_until = None;
+            }
+            conv.updated_at = Utc::now();
+            if let Err(e) = conv_repo.save(&conv) {
+                tracing::error!("Failed to toggle mute: {}", e);
+            }
+            crate::ui::views::chat_list::invalidate_conversations_cache();
+        }
+    }
+
+    pub fn archive_conversation(&mut self, conversation_id: &str) {
+        let Some(db) = self.storage.database() else {
+            return;
+        };
+        let conv_repo = ConversationRepository::new(&*db);
+        if let Some(mut conv) = conv_repo.get(conversation_id) {
+            conv.is_archived = true;
+            conv.updated_at = Utc::now();
+            if let Err(e) = conv_repo.save(&conv) {
+                tracing::error!("Failed to archive conversation: {}", e);
+            }
+            crate::ui::views::chat_list::invalidate_conversations_cache();
+        }
+        if self.selected_conversation_id.as_deref() == Some(conversation_id) {
+            self.selected_conversation_id = None;
+        }
+    }
+
+    pub fn delete_conversation(&mut self, conversation_id: &str) {
+        let Some(db) = self.storage.database() else {
+            return;
+        };
+        let msg_repo = MessageRepository::new(&*db);
+        let conv_repo = ConversationRepository::new(&*db);
+        if let Err(e) = msg_repo.delete_for_conversation(conversation_id) {
+            tracing::error!("Failed to delete messages: {}", e);
+        }
+        if let Err(e) = conv_repo.delete(conversation_id) {
+            tracing::error!("Failed to delete conversation: {}", e);
+        }
+        crate::ui::views::chat_list::invalidate_conversations_cache();
+        crate::ui::views::chat_view::invalidate_messages_cache();
+        if self.selected_conversation_id.as_deref() == Some(conversation_id) {
+            self.selected_conversation_id = None;
+        }
+    }
+
+    pub fn navigate_to_settings(&mut self) {
+        self.view_state = ViewState::Settings;
+    }
+
+    pub fn navigate_to_chat_list(&mut self) {
+        self.view_state = ViewState::ChatList;
+    }
 }
 
 impl eframe::App for SignalApp {

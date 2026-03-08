@@ -496,7 +496,27 @@ impl SignalApp {
     }
 
     pub fn select_conversation(&mut self, id: Option<String>) {
+        if let Some(ref conv_id) = id {
+            self.mark_conversation_read(conv_id);
+        }
         self.selected_conversation_id = id;
+    }
+
+    /// Reset unread count and mark incoming messages as read for a conversation.
+    pub fn mark_conversation_read(&self, conversation_id: &str) {
+        let Some(db) = self.storage.database() else {
+            return;
+        };
+        let conv_repo = ConversationRepository::new(&*db);
+        let msg_repo = MessageRepository::new(&*db);
+
+        if let Err(e) = conv_repo.update_unread(conversation_id, 0) {
+            tracing::error!("Failed to reset unread count: {}", e);
+        }
+        if let Err(e) = msg_repo.mark_read(conversation_id, Utc::now()) {
+            tracing::error!("Failed to mark messages as read: {}", e);
+        }
+        crate::ui::views::chat_list::invalidate_conversations_cache();
     }
 
     pub fn avatar_cache(&self) -> &AvatarCache {

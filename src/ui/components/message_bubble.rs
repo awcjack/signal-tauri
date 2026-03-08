@@ -22,7 +22,7 @@ impl MessageBubble {
     pub fn new(direction: BubbleDirection) -> Self {
         Self {
             direction,
-            max_width: 400.0,
+            max_width: 450.0,
         }
     }
 

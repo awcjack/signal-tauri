@@ -34,7 +34,7 @@ impl SignalColors {
 
     // Message bubble colors
     pub const BUBBLE_SENT: Color32 = Color32::from_rgb(0x2C, 0x6B, 0xED);
-    pub const BUBBLE_RECEIVED: Color32 = Color32::from_rgb(0x3D, 0x3D, 0x3D);
+    pub const BUBBLE_RECEIVED: Color32 = Color32::from_rgb(0x37, 0x3E, 0x47); // Lighter gray-blue for better contrast
 
     // Status colors
     pub const SUCCESS: Color32 = Color32::from_rgb(0x4C, 0xAF, 0x50);

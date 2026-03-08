@@ -364,19 +364,19 @@ fn show_conversation_header(ui: &mut egui::Ui, app: &SignalApp, conversation_id:
             ui.add_space(8.0);
 
             if ui.button("⋮").on_hover_text("More options").clicked() {
-                // Show menu
+                tracing::info!("More options: not yet implemented");
             }
 
             if ui.button("📞").on_hover_text("Voice call").clicked() {
-                // Start voice call
+                tracing::info!("Voice call: not yet implemented (requires Signal protocol integration)");
             }
 
             if ui.button("📹").on_hover_text("Video call").clicked() {
-                // Start video call
+                tracing::info!("Video call: not yet implemented (requires Signal protocol integration)");
             }
 
             if ui.button("🔍").on_hover_text("Search in conversation").clicked() {
-                // Open search
+                tracing::info!("Search in conversation: not yet implemented");
             }
         });
     });
@@ -714,7 +714,9 @@ fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str)
     ui.horizontal(|ui| {
         ui.add_space(8.0);
 
-        if ui.button("📎").on_hover_text("Attach file").clicked() {}
+        if ui.button("📎").on_hover_text("Attach file").clicked() {
+            tracing::info!("Attach file: not yet implemented");
+        }
 
         let input = unsafe { &raw mut MESSAGE_INPUT };
         let input = unsafe { &mut *input };
@@ -724,10 +726,14 @@ fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str)
                 .desired_width(ui.available_width() - 100.0)
         );
 
-        if ui.button("😀").on_hover_text("Emoji").clicked() {}
+        if ui.button("😀").on_hover_text("Emoji").clicked() {
+            tracing::info!("Emoji picker: not yet implemented");
+        }
 
         if input.is_empty() {
-            if ui.button("🎤").on_hover_text("Voice message").clicked() {}
+            if ui.button("🎤").on_hover_text("Voice message").clicked() {
+                tracing::info!("Voice message: not yet implemented (requires audio recording)");
+            }
         } else {
             let should_send = ui.button("➤").on_hover_text("Send").clicked() ||
                (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));

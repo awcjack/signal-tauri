@@ -14,6 +14,10 @@ static mut CONTACT_SEARCH: String = String::new();
 static mut CACHED_CONVERSATIONS: Vec<ConversationItem> = Vec::new();
 static mut CACHED_CONTACTS: Vec<StoredContact> = Vec::new();
 static mut MARK_READ_REQUEST: Option<String> = None;
+static mut PIN_REQUEST: Option<String> = None;
+static mut MUTE_REQUEST: Option<String> = None;
+static mut ARCHIVE_REQUEST: Option<String> = None;
+static mut DELETE_REQUEST: Option<String> = None;
 static CONVERSATIONS_DIRTY: AtomicBool = AtomicBool::new(true);
 static CONTACTS_DIRTY: AtomicBool = AtomicBool::new(true);
 
@@ -138,11 +142,35 @@ pub fn show(app: &mut SignalApp, ui: &mut egui::Ui) {
             });
     }
 
-    // Process pending mark-read requests from context menu
+    // Process pending context menu requests
     let mark_read = unsafe { &raw mut MARK_READ_REQUEST };
     let mark_read = unsafe { &mut *mark_read };
     if let Some(conv_id) = mark_read.take() {
         app.mark_conversation_read(&conv_id);
+    }
+
+    let pin_req = unsafe { &raw mut PIN_REQUEST };
+    let pin_req = unsafe { &mut *pin_req };
+    if let Some(conv_id) = pin_req.take() {
+        app.toggle_pin_conversation(&conv_id);
+    }
+
+    let mute_req = unsafe { &raw mut MUTE_REQUEST };
+    let mute_req = unsafe { &mut *mute_req };
+    if let Some(conv_id) = mute_req.take() {
+        app.toggle_mute_conversation(&conv_id);
+    }
+
+    let archive_req = unsafe { &raw mut ARCHIVE_REQUEST };
+    let archive_req = unsafe { &mut *archive_req };
+    if let Some(conv_id) = archive_req.take() {
+        app.archive_conversation(&conv_id);
+    }
+
+    let delete_req = unsafe { &raw mut DELETE_REQUEST };
+    let delete_req = unsafe { &mut *delete_req };
+    if let Some(conv_id) = delete_req.take() {
+        app.delete_conversation(&conv_id);
     }
 
     if let Some(id) = new_selection {
@@ -501,12 +529,27 @@ fn show_conversation_item(
         );
     }
 
-    // Muted icon
+    // Status icons on the right side of the name row
+    let mut icon_right = text_right;
+
+    // Muted icon (before timestamp)
     if conv.is_muted {
+        icon_right -= 20.0;
         ui.painter().text(
-            egui::Pos2::new(text_right - 30.0, rect.min.y + 16.0),
+            egui::Pos2::new(icon_right, rect.min.y + 16.0),
             egui::Align2::RIGHT_TOP,
             "🔇",
+            egui::FontId::proportional(12.0),
+            SignalColors::TEXT_TERTIARY,
+        );
+    }
+
+    // Pin icon on the bottom-right
+    if conv.is_pinned {
+        ui.painter().text(
+            egui::Pos2::new(text_right, rect.min.y + 44.0),
+            egui::Align2::RIGHT_TOP,
+            "📌",
             egui::FontId::proportional(12.0),
             SignalColors::TEXT_TERTIARY,
         );
@@ -518,10 +561,16 @@ fn show_conversation_item(
     }
 
     response.context_menu(|ui| {
-        if ui.button("Pin conversation").clicked() {
+        let pin_label = if conv.is_pinned { "Unpin conversation" } else { "Pin conversation" };
+        if ui.button(pin_label).clicked() {
+            let req = unsafe { &raw mut PIN_REQUEST };
+            unsafe { *req = Some(conv.id.clone()) };
             ui.close_menu();
         }
-        if ui.button("Mute notifications").clicked() {
+        let mute_label = if conv.is_muted { "Unmute notifications" } else { "Mute notifications" };
+        if ui.button(mute_label).clicked() {
+            let req = unsafe { &raw mut MUTE_REQUEST };
+            unsafe { *req = Some(conv.id.clone()) };
             ui.close_menu();
         }
         if ui.button("Mark as read").clicked() {
@@ -532,9 +581,13 @@ fn show_conversation_item(
         }
         ui.separator();
         if ui.button("Archive").clicked() {
+            let req = unsafe { &raw mut ARCHIVE_REQUEST };
+            unsafe { *req = Some(conv.id.clone()) };
             ui.close_menu();
         }
         if ui.button("Delete").clicked() {
+            let req = unsafe { &raw mut DELETE_REQUEST };
+            unsafe { *req = Some(conv.id.clone()) };
             ui.close_menu();
         }
     });

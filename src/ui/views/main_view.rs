@@ -6,6 +6,8 @@ use egui::{Color32, Rounding, Vec2};
 
 /// Show the main application view with chat list and conversation panels
 pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
+    let mut open_settings = false;
+
     // Top bar with search and menu
     egui::TopBottomPanel::top("top_bar")
         .exact_height(56.0)
@@ -30,7 +32,7 @@ pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
 
                 // Settings button
                 if ui.button("⚙").clicked() {
-                    // Navigate to settings
+                    open_settings = true;
                 }
 
                 ui.add_space(8.0);
@@ -51,4 +53,8 @@ pub fn show(app: &mut SignalApp, ctx: &egui::Context) {
     egui::CentralPanel::default().show(ctx, |ui| {
         super::chat_view::show(app, ui);
     });
+
+    if open_settings {
+        app.navigate_to_settings();
+    }
 }

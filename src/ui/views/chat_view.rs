@@ -74,7 +74,12 @@ pub struct Reaction {
 }
 
 impl MessageItem {
-    fn from_storage(msg: &StorageMessage, my_id: Option<&str>) -> Self {
+    fn from_storage(
+        msg: &StorageMessage,
+        my_id: Option<&str>,
+        is_group: bool,
+        conv_repo: &ConversationRepository,
+    ) -> Self {
         let direction = match msg.direction {
             StorageDirection::Incoming => MessageDirection::Received,
             StorageDirection::Outgoing => MessageDirection::Sent,
@@ -130,17 +135,27 @@ impl MessageItem {
             .map(|(emoji, (count, from_me))| Reaction { emoji, count, from_me })
             .collect();
 
+        // Only show sender name for group conversations, and look up the contact name
+        let sender_name = if is_group && direction == MessageDirection::Received {
+            // Try to look up the sender's name from their conversation entry
+            conv_repo.get(&msg.sender)
+                .map(|c| c.name)
+                .or_else(|| {
+                    // If no conversation exists, try to extract a readable name from the sender ID
+                    // The sender is typically a service ID like "<ACI:uuid>"
+                    Some(msg.sender.clone())
+                })
+        } else {
+            None
+        };
+
         MessageItem {
             id: msg.id.clone(),
             direction,
             content,
             timestamp: msg.sent_at,
             status,
-            sender_name: if direction == MessageDirection::Received {
-                Some(msg.sender.clone())
-            } else {
-                None
-            },
+            sender_name,
             reply_to: None,
             reactions,
         }
@@ -221,28 +236,33 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
     let cached_name = unsafe { &mut *cached_name };
     let cached_messages = unsafe { &raw mut CACHED_MESSAGES };
     let cached_messages = unsafe { &mut *cached_messages };
-    
+
     let conversation_changed = cached_id.as_deref() != Some(conversation_id);
     let is_dirty = MESSAGES_DIRTY.load(Ordering::SeqCst);
-    
+
     if !conversation_changed && !is_dirty {
         return (cached_name.clone(), cached_messages.clone());
     }
-    
+
     if let Some(db) = app.storage().database() {
         let conv_repo = ConversationRepository::new(&*db);
         let msg_repo = MessageRepository::new(&*db);
 
-        let name = conv_repo
-            .get(conversation_id)
-            .map(|c| c.name)
+        let conversation = conv_repo.get(conversation_id);
+        let name = conversation.as_ref()
+            .map(|c| c.name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
+
+        // Determine if this is a group conversation for sender name display
+        let is_group = conversation.as_ref()
+            .map(|c| c.conversation_type == crate::storage::conversations::ConversationType::Group)
+            .unwrap_or(false);
 
         let my_id = app.storage().get_phone_number();
         let mut messages: Vec<MessageItem> = msg_repo
             .get_for_conversation(conversation_id, 100, None)
             .iter()
-            .map(|m| MessageItem::from_storage(m, my_id.as_deref()))
+            .map(|m| MessageItem::from_storage(m, my_id.as_deref(), is_group, &conv_repo))
             .collect();
         messages.reverse();
 
@@ -250,7 +270,7 @@ fn load_conversation_data(app: &SignalApp, conversation_id: &str) -> (String, Ve
         *cached_name = name.clone();
         *cached_messages = messages.clone();
         MESSAGES_DIRTY.store(false, Ordering::SeqCst);
-        
+
         (name, messages)
     } else {
         ("Demo Conversation".to_string(), get_placeholder_messages())
@@ -409,7 +429,8 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
 
     // Cache available width before any allocation
     let total_width = ui.available_width();
-    let max_width = total_width * 0.7;
+    // Use 85% of available width for better space utilization
+    let max_width = (total_width * 0.85).min(600.0); // Cap at 600px for readability
 
     let bubble_color = if is_sent {
         SignalColors::BUBBLE_SENT
@@ -419,12 +440,12 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
 
     ui.horizontal(|ui| {
         if is_sent {
-            // Calculate spacing to right-align the bubble
-            // Use cached total_width to ensure proper calculation
-            let spacing = (total_width - max_width - 20.0).max(12.0);
-            ui.add_space(spacing);
+            // Right-align: add flexible space then fixed margin
+            let min_spacing = (total_width - max_width).max(8.0);
+            ui.add_space(min_spacing);
         } else {
-            ui.add_space(12.0);
+            // Left-align: small fixed margin
+            ui.add_space(8.0);
         }
 
         // Message bubble
@@ -498,30 +519,35 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
                     }
                 }
 
-                // Timestamp and status
-                ui.horizontal(|ui| {
+                // Timestamp and status - right-aligned within the bubble
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    // In RTL layout, first item appears on the right
+                    // We want: [timestamp] [status] so render status first, then timestamp
+
+                    // Status icon (for sent messages only)
+                    if is_sent {
+                        let (status_icon, status_color) = match msg.status {
+                            MessageStatus::Sending => ("◯", Color32::from_white_alpha(140)),
+                            MessageStatus::Sent => ("✓", Color32::from_white_alpha(180)),
+                            MessageStatus::Delivered => ("✓✓", Color32::from_white_alpha(180)),
+                            MessageStatus::Read => ("✓✓", SignalColors::SIGNAL_BLUE),
+                            MessageStatus::Failed => ("⚠", SignalColors::ERROR),
+                        };
+                        ui.label(egui::RichText::new(status_icon).size(10.0).color(status_color));
+                        ui.add_space(3.0);
+                    }
+
+                    // Timestamp (rendered second in RTL, appears before status)
                     let time_str = msg.timestamp.with_timezone(&Local).format("%H:%M").to_string();
                     ui.label(
-                        egui::RichText::new(time_str)
-                            .size(11.0)
-                            .color(Color32::from_white_alpha(180))
+                        egui::RichText::new(&time_str)
+                            .size(10.0)
+                            .color(if is_sent {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 180)
+                            } else {
+                                Color32::from_rgba_unmultiplied(0, 0, 0, 140)
+                            })
                     );
-
-                    if is_sent {
-                        let status_icon = match msg.status {
-                            MessageStatus::Sending => "○",
-                            MessageStatus::Sent => "✓",
-                            MessageStatus::Delivered => "✓✓",
-                            MessageStatus::Read => "✓✓",
-                            MessageStatus::Failed => "⚠",
-                        };
-                        let status_color = match msg.status {
-                            MessageStatus::Read => SignalColors::SIGNAL_BLUE,
-                            MessageStatus::Failed => SignalColors::ERROR,
-                            _ => Color32::from_white_alpha(180),
-                        };
-                        ui.label(egui::RichText::new(status_icon).size(11.0).color(status_color));
-                    }
                 });
 
                 // Reactions

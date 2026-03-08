@@ -427,10 +427,14 @@ fn format_date(date: &DateTime<Utc>) -> String {
 fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
     let is_sent = msg.direction == MessageDirection::Sent;
 
-    // Cache available width before any allocation
-    let total_width = ui.available_width();
-    // Use 85% of available width for better space utilization
-    let max_width = (total_width * 0.85).min(600.0); // Cap at 600px for readability
+    // Content-based sizing with max-width (like modern messaging apps)
+    // Bubbles shrink to fit short messages, expand up to max-width for longer ones
+    let max_bubble_width = 480.0; // Maximum width for message bubbles
+    let frame_margin = 12.0; // Horizontal margin inside the frame
+    let edge_margin = 16.0; // Margin from window edge on both sides
+
+    // Calculate max content width (excluding frame margins)
+    let max_content_width = max_bubble_width - (frame_margin * 2.0);
 
     let bubble_color = if is_sent {
         SignalColors::BUBBLE_SENT
@@ -438,129 +442,262 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
         SignalColors::BUBBLE_RECEIVED
     };
 
-    ui.horizontal(|ui| {
-        if is_sent {
-            // Right-align: add flexible space then fixed margin
-            let min_spacing = (total_width - max_width).max(8.0);
-            ui.add_space(min_spacing);
-        } else {
-            // Left-align: small fixed margin
-            ui.add_space(8.0);
-        }
+    if is_sent {
+        // Pre-measure content width so we can right-align via a left spacer.
+        // We use left_to_right layout (which correctly content-sizes Frames)
+        // and push the bubble right with a calculated spacer.
+        let body_font = egui::TextStyle::Body.resolve(ui.style());
+        let content_text_width = match &msg.content {
+            MessageContent::Text(text) => {
+                ui.fonts(|f| f.layout(text.clone(), body_font.clone(), Color32::WHITE, max_content_width))
+                    .size()
+                    .x
+            }
+            MessageContent::Image { .. } => 200.0,
+            MessageContent::File { name, .. } => {
+                ui.fonts(|f| f.layout_no_wrap(name.clone(), body_font.clone(), Color32::WHITE))
+                    .size()
+                    .x
+                    + 30.0
+            }
+            MessageContent::Voice { .. } => 80.0,
+            _ => max_content_width,
+        };
 
-        // Message bubble
-        egui::Frame::none()
-            .fill(bubble_color)
-            .rounding(Rounding {
-                nw: if is_sent { 16.0 } else { 4.0 },
-                ne: if is_sent { 4.0 } else { 16.0 },
-                sw: 16.0,
-                se: 16.0,
+        // Measure timestamp + status width
+        let time_str = msg.timestamp.with_timezone(&Local).format("%H:%M").to_string();
+        let time_width = ui
+            .fonts(|f| {
+                f.layout_no_wrap(
+                    time_str,
+                    egui::FontId::proportional(10.0),
+                    Color32::WHITE,
+                )
             })
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-            .show(ui, |ui| {
-                ui.set_max_width(max_width);
+            .size()
+            .x
+            + 25.0; // status icon + spacing
 
-                // Sender name for group messages
-                if let Some(sender) = &msg.sender_name {
-                    if !is_sent {
-                        ui.label(
-                            egui::RichText::new(sender)
-                                .size(12.0)
-                                .color(SignalColors::SIGNAL_BLUE)
-                                .strong()
-                        );
-                    }
-                }
+        let inner_width = content_text_width.max(time_width);
+        let bubble_width = (inner_width + frame_margin * 2.0 + 4.0).min(max_bubble_width);
 
-                // Message content
-                match &msg.content {
-                    MessageContent::Text(text) => {
-                        show_emoji_text(ui, text, Color32::WHITE);
-                    }
-                    MessageContent::Image { caption, .. } => {
-                        // Placeholder for image
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(200.0, 150.0), Sense::click());
-                        ui.painter().rect_filled(rect, Rounding::same(8.0), Color32::DARK_GRAY);
-                        ui.painter().text(
-                            rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "📷 Image",
-                            egui::FontId::proportional(14.0),
-                            Color32::WHITE,
-                        );
+        let available = ui.available_width();
+        let spacer = (available - bubble_width - edge_margin).max(0.0);
 
-                        if let Some(cap) = caption {
-                            show_emoji_text(ui, cap, Color32::WHITE);
-                        }
-                    }
-                    MessageContent::File { name, size } => {
-                        ui.horizontal(|ui| {
-                            ui.label("📄");
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new(name).color(Color32::WHITE));
-                                ui.label(
-                                    egui::RichText::new(format_file_size(*size))
-                                        .size(11.0)
-                                        .color(SignalColors::TEXT_SECONDARY)
+        // left_to_right correctly content-sizes Frames (proven by received messages)
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            ui.add_space(spacer);
+
+            egui::Frame::none()
+                .fill(bubble_color)
+                .rounding(Rounding {
+                    nw: 16.0,
+                    ne: 4.0,
+                    sw: 16.0,
+                    se: 16.0,
+                })
+                .inner_margin(egui::Margin::symmetric(frame_margin, 8.0))
+                .show(ui, |ui| {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        ui.set_max_width(max_content_width);
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
+                        // Message content
+                        match &msg.content {
+                            MessageContent::Text(text) => {
+                                show_emoji_text(ui, text, Color32::WHITE);
+                            }
+                            MessageContent::Image { caption, .. } => {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(Vec2::new(200.0, 150.0), Sense::click());
+                                ui.painter().rect_filled(
+                                    rect,
+                                    Rounding::same(8.0),
+                                    Color32::DARK_GRAY,
                                 );
-                            });
-                        });
-                    }
-                    MessageContent::Voice { duration_secs } => {
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "📷 Image",
+                                    egui::FontId::proportional(14.0),
+                                    Color32::WHITE,
+                                );
+
+                                if let Some(cap) = caption {
+                                    show_emoji_text(ui, cap, Color32::WHITE);
+                                }
+                            }
+                            MessageContent::File { name, size } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("📄");
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(name).color(Color32::WHITE),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format_file_size(*size))
+                                                .size(11.0)
+                                                .color(SignalColors::TEXT_SECONDARY),
+                                        );
+                                    });
+                                });
+                            }
+                            MessageContent::Voice { duration_secs } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("🎤");
+                                    ui.label(
+                                        egui::RichText::new(format_duration(*duration_secs))
+                                            .color(Color32::WHITE),
+                                    );
+                                });
+                            }
+                            _ => {
+                                ui.label(
+                                    egui::RichText::new("[Unsupported content]")
+                                        .color(Color32::WHITE),
+                                );
+                            }
+                        }
+
+                        // Timestamp and status
                         ui.horizontal(|ui| {
-                            ui.label("🎤");
-                            ui.label(egui::RichText::new(format_duration(*duration_secs)).color(Color32::WHITE));
-                            // Play button would go here
+                            let time_str = msg
+                                .timestamp
+                                .with_timezone(&Local)
+                                .format("%H:%M")
+                                .to_string();
+                            ui.label(
+                                egui::RichText::new(&time_str)
+                                    .size(10.0)
+                                    .color(Color32::from_rgba_unmultiplied(255, 255, 255, 180)),
+                            );
+                            ui.add_space(3.0);
+                            let (status_icon, status_color) = match msg.status {
+                                MessageStatus::Sending => ("◯", Color32::from_white_alpha(140)),
+                                MessageStatus::Sent => ("✓", Color32::from_white_alpha(180)),
+                                MessageStatus::Delivered => {
+                                    ("✓✓", Color32::from_white_alpha(180))
+                                }
+                                MessageStatus::Read => ("✓✓", SignalColors::SIGNAL_BLUE),
+                                MessageStatus::Failed => ("⚠", SignalColors::ERROR),
+                            };
+                            ui.label(
+                                egui::RichText::new(status_icon)
+                                    .size(10.0)
+                                    .color(status_color),
+                            );
                         });
-                    }
-                    _ => {
-                        ui.label(egui::RichText::new("[Unsupported content]").color(Color32::WHITE));
-                    }
-                }
 
-                // Timestamp and status - right-aligned within the bubble
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    // In RTL layout, first item appears on the right
-                    // We want: [timestamp] [status] so render status first, then timestamp
-
-                    // Status icon (for sent messages only)
-                    if is_sent {
-                        let (status_icon, status_color) = match msg.status {
-                            MessageStatus::Sending => ("◯", Color32::from_white_alpha(140)),
-                            MessageStatus::Sent => ("✓", Color32::from_white_alpha(180)),
-                            MessageStatus::Delivered => ("✓✓", Color32::from_white_alpha(180)),
-                            MessageStatus::Read => ("✓✓", SignalColors::SIGNAL_BLUE),
-                            MessageStatus::Failed => ("⚠", SignalColors::ERROR),
-                        };
-                        ui.label(egui::RichText::new(status_icon).size(10.0).color(status_color));
-                        ui.add_space(3.0);
-                    }
-
-                    // Timestamp (rendered second in RTL, appears before status)
-                    let time_str = msg.timestamp.with_timezone(&Local).format("%H:%M").to_string();
-                    ui.label(
-                        egui::RichText::new(&time_str)
-                            .size(10.0)
-                            .color(if is_sent {
-                                Color32::from_rgba_unmultiplied(255, 255, 255, 180)
-                            } else {
-                                Color32::from_rgba_unmultiplied(0, 0, 0, 140)
-                            })
-                    );
-                });
-
-                // Reactions
-                if !msg.reactions.is_empty() {
-                    ui.horizontal(|ui| {
-                        for reaction in &msg.reactions {
-                            let text = format!("{} {}", reaction.emoji, reaction.count);
-                            ui.small_button(text);
+                        // Reactions
+                        if !msg.reactions.is_empty() {
+                            ui.horizontal(|ui| {
+                                for reaction in &msg.reactions {
+                                    let text =
+                                        format!("{} {}", reaction.emoji, reaction.count);
+                                    ui.small_button(text);
+                                }
+                            });
                         }
                     });
-                }
-            });
-    });
+                });
+        });
+    } else {
+        // Left-align received messages
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            ui.add_space(edge_margin);
+
+            egui::Frame::none()
+                .fill(bubble_color)
+                .rounding(Rounding {
+                    nw: 4.0,
+                    ne: 16.0,
+                    sw: 16.0,
+                    se: 16.0,
+                })
+                .inner_margin(egui::Margin::symmetric(frame_margin, 8.0))
+                .show(ui, |ui| {
+                    // Force top-down layout for consistent rendering
+                    ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        ui.set_max_width(max_content_width);
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+
+                        // Sender name for group messages
+                        if let Some(sender) = &msg.sender_name {
+                            ui.label(
+                                egui::RichText::new(sender)
+                                    .size(12.0)
+                                    .color(SignalColors::SIGNAL_BLUE)
+                                    .strong()
+                            );
+                        }
+
+                        // Message content
+                        match &msg.content {
+                            MessageContent::Text(text) => {
+                                show_emoji_text(ui, text, Color32::WHITE);
+                            }
+                            MessageContent::Image { caption, .. } => {
+                                let (rect, _) = ui.allocate_exact_size(Vec2::new(200.0, 150.0), Sense::click());
+                                ui.painter().rect_filled(rect, Rounding::same(8.0), Color32::DARK_GRAY);
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "📷 Image",
+                                    egui::FontId::proportional(14.0),
+                                    Color32::WHITE,
+                                );
+
+                                if let Some(cap) = caption {
+                                    show_emoji_text(ui, cap, Color32::WHITE);
+                                }
+                            }
+                            MessageContent::File { name, size } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("📄");
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new(name).color(Color32::WHITE));
+                                        ui.label(
+                                            egui::RichText::new(format_file_size(*size))
+                                                .size(11.0)
+                                                .color(SignalColors::TEXT_SECONDARY)
+                                        );
+                                    });
+                                });
+                            }
+                            MessageContent::Voice { duration_secs } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("🎤");
+                                    ui.label(egui::RichText::new(format_duration(*duration_secs)).color(Color32::WHITE));
+                                });
+                            }
+                            _ => {
+                                ui.label(egui::RichText::new("[Unsupported content]").color(Color32::WHITE));
+                            }
+                        }
+
+                        // Timestamp
+                        ui.horizontal(|ui| {
+                            let time_str = msg.timestamp.with_timezone(&Local).format("%H:%M").to_string();
+                            ui.label(
+                                egui::RichText::new(&time_str)
+                                    .size(10.0)
+                                    .color(Color32::from_rgba_unmultiplied(255, 255, 255, 140))
+                            );
+                        });
+
+                        // Reactions
+                        if !msg.reactions.is_empty() {
+                            ui.horizontal(|ui| {
+                                for reaction in &msg.reactions {
+                                    let text = format!("{} {}", reaction.emoji, reaction.count);
+                                    ui.small_button(text);
+                                }
+                            });
+                        }
+                    });
+                });
+        });
+    }
 }
 
 fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str) {

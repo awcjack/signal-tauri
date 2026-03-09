@@ -586,20 +586,61 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
                                     .color(Color32::from_rgba_unmultiplied(255, 255, 255, 180)),
                             );
                             ui.add_space(3.0);
-                            let (status_icon, status_color) = match msg.status {
-                                MessageStatus::Sending => ("◯", Color32::from_white_alpha(140)),
-                                MessageStatus::Sent => ("✓", Color32::from_white_alpha(180)),
-                                MessageStatus::Delivered => {
-                                    ("✓✓", Color32::from_white_alpha(180))
+                            match msg.status {
+                                MessageStatus::Sending => {
+                                    ui.label(
+                                        egui::RichText::new("...")
+                                            .size(10.0)
+                                            .color(Color32::from_white_alpha(140)),
+                                    );
                                 }
-                                MessageStatus::Read => ("✓✓", SignalColors::SIGNAL_BLUE),
-                                MessageStatus::Failed => ("⚠", SignalColors::ERROR),
-                            };
-                            ui.label(
-                                egui::RichText::new(status_icon)
-                                    .size(10.0)
-                                    .color(status_color),
-                            );
+                                MessageStatus::Failed => {
+                                    ui.label(
+                                        egui::RichText::new("!")
+                                            .size(10.0)
+                                            .color(SignalColors::ERROR),
+                                    );
+                                }
+                                _ => {
+                                    let color = match msg.status {
+                                        MessageStatus::Read => SignalColors::SIGNAL_BLUE,
+                                        _ => Color32::from_white_alpha(180),
+                                    };
+                                    let double = matches!(
+                                        msg.status,
+                                        MessageStatus::Delivered | MessageStatus::Read
+                                    );
+                                    let check_w = if double { 16.0 } else { 10.0 };
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        Vec2::new(check_w, 10.0),
+                                        Sense::hover(),
+                                    );
+                                    let stroke = egui::Stroke::new(1.2, color);
+                                    let p = ui.painter();
+                                    // Draw first checkmark
+                                    let cx = rect.left() + 3.0;
+                                    let cy = rect.center().y;
+                                    p.line_segment(
+                                        [egui::pos2(cx - 2.0, cy), egui::pos2(cx, cy + 2.5)],
+                                        stroke,
+                                    );
+                                    p.line_segment(
+                                        [egui::pos2(cx, cy + 2.5), egui::pos2(cx + 4.0, cy - 2.5)],
+                                        stroke,
+                                    );
+                                    if double {
+                                        let cx2 = cx + 5.0;
+                                        p.line_segment(
+                                            [egui::pos2(cx2 - 2.0, cy), egui::pos2(cx2, cy + 2.5)],
+                                            stroke,
+                                        );
+                                        p.line_segment(
+                                            [egui::pos2(cx2, cy + 2.5), egui::pos2(cx2 + 4.0, cy - 2.5)],
+                                            stroke,
+                                        );
+                                    }
+                                }
+                            }
                         });
 
                         // Reactions

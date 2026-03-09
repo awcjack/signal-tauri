@@ -60,6 +60,13 @@ notify-rust = "4"
 # Audio for voice notes
 rodio = "0.19"
 
+# File picker dialog
+rfd = "0.15"
+
+# Audio recording
+cpal = "0.15"
+hound = "3.5"
+
 # HTTP client for attachments
 # Use rustls to avoid macOS SecureTransport certificate issues
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

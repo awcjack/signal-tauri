@@ -12,7 +12,9 @@ use crate::ui::widgets::emoji_picker::EmojiPicker;
 use crate::ui::widgets::voice_recorder::VoiceRecorder;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
-use crate::ui::components::emoji_text::{show_emoji_text, show_emoji_text_styled};
+use crate::ui::components::emoji_text::{
+    emoji_aware_layouter, overlay_emoji_on_textedit, show_emoji_text, show_emoji_text_styled,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -870,11 +872,16 @@ fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str)
         let input = unsafe { &mut *input };
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            let _response = ui.add(
-                egui::TextEdit::singleline(input)
-                    .hint_text("Add a caption...")
-                    .desired_width(ui.available_width() - 60.0),
-            );
+            let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+                emoji_aware_layouter(ui, text, wrap_width)
+            };
+            let output = egui::TextEdit::singleline(input)
+                .hint_text("Add a caption...")
+                .desired_width(ui.available_width() - 60.0)
+                .layouter(&mut layouter)
+                .show(ui);
+            overlay_emoji_on_textedit(ui, &output, input);
+            let _response = output.response;
             if ui.button("➤").on_hover_text("Send").clicked() {
                 send_attachment_message(app, conversation_id, &path_clone);
                 *pending = None;
@@ -925,11 +932,16 @@ fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str)
 
         let input = unsafe { &raw mut MESSAGE_INPUT };
         let input = unsafe { &mut *input };
-        let response = ui.add(
-            egui::TextEdit::singleline(input)
-                .hint_text("Message...")
-                .desired_width(ui.available_width() - 100.0),
-        );
+        let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+            emoji_aware_layouter(ui, text, wrap_width)
+        };
+        let output = egui::TextEdit::singleline(input)
+            .hint_text("Message...")
+            .desired_width(ui.available_width() - 100.0)
+            .layouter(&mut layouter)
+            .show(ui);
+        overlay_emoji_on_textedit(ui, &output, input);
+        let response = output.response;
 
         // Emoji button — toggle popup using egui's memory-based popup state.
         // Use a fixed Id so it matches between the inner horizontal ui and the outer ui.

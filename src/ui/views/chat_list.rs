@@ -4,6 +4,7 @@ use crate::app::SignalApp;
 use crate::storage::contacts::{ContactRepository, StoredContact};
 use crate::storage::conversations::{Conversation, ConversationType, ConversationRepository};
 use crate::ui::avatar_cache::AvatarCache;
+use crate::ui::components::emoji_text::paint_emoji_text;
 use crate::ui::theme::SignalColors;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
@@ -321,7 +322,8 @@ fn show_contact_item(ui: &mut egui::Ui, contact: &StoredContact) -> bool {
 
     let text_left = avatar_rect.right() + padding;
     
-    ui.painter().text(
+    paint_emoji_text(
+        ui,
         egui::Pos2::new(text_left, rect.min.y + 12.0),
         egui::Align2::LEFT_TOP,
         contact.display_name(),
@@ -464,7 +466,8 @@ fn show_conversation_item(
     let text_right = rect.right() - padding;
 
     // Name
-    ui.painter().text(
+    paint_emoji_text(
+        ui,
         egui::Pos2::new(text_left, rect.min.y + 16.0),
         egui::Align2::LEFT_TOP,
         &conv.name,
@@ -500,7 +503,8 @@ fn show_conversation_item(
             SignalColors::TEXT_SECONDARY
         };
 
-        ui.painter().text(
+        paint_emoji_text(
+            ui,
             egui::Pos2::new(text_left, rect.min.y + 38.0),
             egui::Align2::LEFT_TOP,
             &preview,
@@ -535,7 +539,8 @@ fn show_conversation_item(
     // Muted icon (before timestamp)
     if conv.is_muted {
         icon_right -= 20.0;
-        ui.painter().text(
+        paint_emoji_text(
+            ui,
             egui::Pos2::new(icon_right, rect.min.y + 16.0),
             egui::Align2::RIGHT_TOP,
             "🔇",
@@ -546,7 +551,8 @@ fn show_conversation_item(
 
     // Pin icon on the bottom-right
     if conv.is_pinned {
-        ui.painter().text(
+        paint_emoji_text(
+            ui,
             egui::Pos2::new(text_right, rect.min.y + 44.0),
             egui::Align2::RIGHT_TOP,
             "📌",

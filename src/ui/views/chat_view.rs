@@ -12,7 +12,7 @@ use crate::ui::widgets::emoji_picker::EmojiPicker;
 use crate::ui::widgets::voice_recorder::VoiceRecorder;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
-use crate::ui::components::emoji_text::show_emoji_text;
+use crate::ui::components::emoji_text::{show_emoji_text, show_emoji_text_styled};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -359,7 +359,7 @@ fn show_conversation_header(ui: &mut egui::Ui, app: &SignalApp, conversation_id:
 
         ui.vertical(|ui| {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new(name).strong().size(16.0));
+            show_emoji_text_styled(ui, name, 16.0, SignalColors::TEXT_PRIMARY, true);
             ui.label(egui::RichText::new("").size(12.0).color(SignalColors::TEXT_SECONDARY));
         });
 

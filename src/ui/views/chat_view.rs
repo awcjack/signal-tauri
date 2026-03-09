@@ -8,11 +8,15 @@ use crate::signal::messages::{
 use crate::storage::conversations::ConversationRepository;
 use crate::storage::messages::MessageRepository;
 use crate::ui::theme::SignalColors;
+use crate::ui::widgets::emoji_picker::EmojiPicker;
+use crate::ui::widgets::voice_recorder::VoiceRecorder;
 use chrono::{DateTime, Local, Utc};
 use egui::{Color32, Rounding, Sense, Vec2};
 use crate::ui::components::emoji_text::show_emoji_text;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 static mut CACHED_CONVERSATION_ID: Option<String> = None;
 static mut CACHED_CONVERSATION_NAME: String = String::new();
@@ -708,14 +712,215 @@ fn show_message(ui: &mut egui::Ui, msg: &MessageItem) {
     }
 }
 
+/// Voice recording state machine
+enum VoiceState {
+    Idle,
+    Recording {
+        start_time: Instant,
+        recorder: VoiceRecorder,
+    },
+    Recorded {
+        path: PathBuf,
+        duration_secs: u32,
+    },
+}
+
 fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str) {
     static mut MESSAGE_INPUT: String = String::new();
+    static mut EMOJI_PICKER: Option<EmojiPicker> = None;
+    static mut PENDING_ATTACHMENT: Option<PathBuf> = None;
+    static mut FILE_PICKER_OPEN: bool = false;
+    static mut VOICE_STATE: Option<VoiceState> = None;
 
+    let voice_state = unsafe { &raw mut VOICE_STATE };
+    let voice_state = unsafe { &mut *voice_state };
+    if voice_state.is_none() {
+        *voice_state = Some(VoiceState::Idle);
+    }
+
+    // Check if we're in an active recording state
+    let is_recording = matches!(voice_state, Some(VoiceState::Recording { .. }));
+    let is_recorded = matches!(voice_state, Some(VoiceState::Recorded { .. }));
+
+    // Show recording UI if actively recording
+    if is_recording {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+
+            let duration = if let Some(VoiceState::Recording { start_time, .. }) = voice_state.as_ref() {
+                start_time.elapsed().as_secs() as u32
+            } else {
+                0
+            };
+
+            // Red recording indicator
+            ui.colored_label(Color32::RED, "⏺");
+            ui.label(
+                egui::RichText::new(format!("Recording {}:{:02}", duration / 60, duration % 60))
+                    .color(Color32::WHITE),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+
+                // Cancel button
+                if ui.button("✕").on_hover_text("Cancel").clicked() {
+                    *voice_state = Some(VoiceState::Idle);
+                }
+
+                // Stop button
+                if ui.button("⏹").on_hover_text("Stop recording").clicked() {
+                    if let Some(VoiceState::Recording { recorder, start_time, .. }) =
+                        voice_state.take()
+                    {
+                        let dur = start_time.elapsed().as_secs() as u32;
+                        let temp_path = std::env::temp_dir().join(format!(
+                            "signal_voice_{}.wav",
+                            uuid::Uuid::new_v4()
+                        ));
+                        let mut recorder = recorder;
+                        match recorder.stop(&temp_path) {
+                            Ok(path) => {
+                                *voice_state = Some(VoiceState::Recorded {
+                                    path,
+                                    duration_secs: dur.max(1),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to stop recording: {}", e);
+                                *voice_state = Some(VoiceState::Idle);
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Request repaint to update timer
+            ui.ctx().request_repaint();
+        });
+        return;
+    }
+
+    // Show recorded voice message ready to send
+    if is_recorded {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+
+            let (path, duration) = if let Some(VoiceState::Recorded { path, duration_secs }) = voice_state.as_ref() {
+                (path.clone(), *duration_secs)
+            } else {
+                return;
+            };
+
+            ui.label("🎤");
+            ui.label(
+                egui::RichText::new(format!(
+                    "Voice message ({}:{:02})",
+                    duration / 60,
+                    duration % 60
+                ))
+                .color(Color32::WHITE),
+            );
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+
+                // Cancel
+                if ui.button("✕").on_hover_text("Discard").clicked() {
+                    let _ = std::fs::remove_file(&path);
+                    *voice_state = Some(VoiceState::Idle);
+                    return;
+                }
+
+                // Send
+                if ui.button("➤").on_hover_text("Send voice message").clicked() {
+                    send_attachment_message(app, conversation_id, &path);
+                    *voice_state = Some(VoiceState::Idle);
+                }
+            });
+        });
+        return;
+    }
+
+    // Show attachment preview bar if a file is pending
+    let pending = unsafe { &raw mut PENDING_ATTACHMENT };
+    let pending = unsafe { &mut *pending };
+    if let Some(ref attachment_path) = *pending {
+        let filename = attachment_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let path_clone = attachment_path.clone();
+
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.label("📎");
+            ui.label(
+                egui::RichText::new(&filename)
+                    .color(SignalColors::SIGNAL_BLUE),
+            );
+            if ui.small_button("✕").on_hover_text("Remove attachment").clicked() {
+                *pending = None;
+            }
+        });
+
+        // If there's a pending attachment, show send button below
+        let input = unsafe { &raw mut MESSAGE_INPUT };
+        let input = unsafe { &mut *input };
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let _response = ui.add(
+                egui::TextEdit::singleline(input)
+                    .hint_text("Add a caption...")
+                    .desired_width(ui.available_width() - 60.0),
+            );
+            if ui.button("➤").on_hover_text("Send").clicked() {
+                send_attachment_message(app, conversation_id, &path_clone);
+                *pending = None;
+                input.clear();
+            }
+            ui.add_space(8.0);
+        });
+        return;
+    }
+
+    // Normal message input bar
     ui.horizontal(|ui| {
         ui.add_space(8.0);
 
-        if ui.button("📎").on_hover_text("Attach file").clicked() {
-            tracing::info!("Attach file: not yet implemented");
+        // Attach file button
+        let file_picker_open = unsafe { &raw mut FILE_PICKER_OPEN };
+        let file_picker_open = unsafe { &mut *file_picker_open };
+        if ui.button("📎").on_hover_text("Attach file").clicked() && !*file_picker_open {
+            *file_picker_open = true;
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                if let Ok(rt) = rt {
+                    rt.block_on(async {
+                        let file = rfd::AsyncFileDialog::new()
+                            .set_title("Choose a file to send")
+                            .pick_file()
+                            .await;
+                        if let Some(file) = file {
+                            let path = file.path().to_path_buf();
+                            unsafe {
+                                PENDING_ATTACHMENT = Some(path);
+                                FILE_PICKER_OPEN = false;
+                            }
+                            ctx.request_repaint();
+                        } else {
+                            unsafe {
+                                FILE_PICKER_OPEN = false;
+                            }
+                            ctx.request_repaint();
+                        }
+                    });
+                }
+            });
         }
 
         let input = unsafe { &raw mut MESSAGE_INPUT };
@@ -723,21 +928,35 @@ fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str)
         let response = ui.add(
             egui::TextEdit::singleline(input)
                 .hint_text("Message...")
-                .desired_width(ui.available_width() - 100.0)
+                .desired_width(ui.available_width() - 100.0),
         );
 
+        // Emoji button — toggle popup using egui's memory-based popup state.
+        // Use a fixed Id so it matches between the inner horizontal ui and the outer ui.
+        let emoji_popup_id = egui::Id::new("emoji_picker_popup");
         if ui.button("😀").on_hover_text("Emoji").clicked() {
-            tracing::info!("Emoji picker: not yet implemented");
+            ui.memory_mut(|mem| mem.toggle_popup(emoji_popup_id));
         }
 
         if input.is_empty() {
+            // Voice message button
             if ui.button("🎤").on_hover_text("Voice message").clicked() {
-                tracing::info!("Voice message: not yet implemented (requires audio recording)");
+                match VoiceRecorder::start() {
+                    Ok(recorder) => {
+                        *voice_state = Some(VoiceState::Recording {
+                            start_time: Instant::now(),
+                            recorder,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to start recording: {}", e);
+                    }
+                }
             }
         } else {
-            let should_send = ui.button("➤").on_hover_text("Send").clicked() ||
-               (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-            
+            let should_send = ui.button("➤").on_hover_text("Send").clicked()
+                || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+
             if should_send {
                 let text = input.clone();
                 input.clear();
@@ -747,6 +966,49 @@ fn show_message_input(app: &SignalApp, ui: &mut egui::Ui, conversation_id: &str)
 
         ui.add_space(8.0);
     });
+
+    // Emoji picker popup — rendered outside the horizontal layout so it can float freely.
+    // Use the same fixed Id as the button above.
+    let emoji_popup_id = egui::Id::new("emoji_picker_popup");
+    let emoji_open = ui.memory(|mem| mem.is_popup_open(emoji_popup_id));
+    if emoji_open {
+        let picker = unsafe { &raw mut EMOJI_PICKER };
+        let picker = unsafe { &mut *picker };
+        if picker.is_none() {
+            *picker = Some(EmojiPicker::new());
+        }
+
+        // Position above the input bar, clamped so it stays on screen
+        let popup_y = (ui.min_rect().top() - 330.0).max(8.0);
+        let _area_response = egui::Area::new(emoji_popup_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(ui.min_rect().left() + 8.0, popup_y))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(8.0))
+                    .show(ui, |ui| {
+                        ui.set_width(320.0);
+                        ui.set_height(300.0);
+                        if let Some(ref mut ep) = picker {
+                            if let Some(emoji) = ep.show(ui) {
+                                let input = unsafe { &raw mut MESSAGE_INPUT };
+                                let input = unsafe { &mut *input };
+                                input.push_str(&emoji);
+                                ui.memory_mut(|mem| mem.close_popup());
+                            }
+                        }
+                    });
+            });
+
+        // Close on Escape only. The popup also closes when:
+        // - an emoji is selected (above)
+        // - the emoji button is clicked again (toggle_popup)
+        // We intentionally avoid clicked_elsewhere() because it fires on the
+        // same frame the button opens the popup, causing instant dismissal.
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ui.memory_mut(|mem| mem.close_popup());
+        }
+    }
 }
 
 fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
@@ -839,6 +1101,147 @@ fn send_message(app: &SignalApp, conversation_id: &str, text: &str) {
     });
 
     tracing::info!("Queued message for sending: {}", text_for_log);
+}
+
+/// Send an attachment message (file, image, audio, video) by copying to attachments dir
+fn send_attachment_message(app: &SignalApp, conversation_id: &str, file_path: &std::path::Path) {
+    use crate::signal::messages::{Content, Message, MessageDirection, MessageStatus};
+    use crate::storage::conversations::ConversationRepository;
+    use crate::storage::messages::MessageRepository;
+
+    let Some(db) = app.storage().database() else {
+        tracing::warn!("No database available, cannot send attachment");
+        return;
+    };
+
+    let my_id = app
+        .storage()
+        .get_phone_number()
+        .unwrap_or_else(|| "me".to_string());
+
+    // Generate a UUID-based filename preserving the extension
+    let extension = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let attachment_id = uuid::Uuid::new_v4().to_string();
+    let dest_filename = if extension.is_empty() {
+        attachment_id.clone()
+    } else {
+        format!("{}.{}", attachment_id, extension)
+    };
+
+    // Copy file to attachments directory
+    let dest_path = app.storage().attachments_dir().join(&dest_filename);
+    if let Err(e) = std::fs::copy(file_path, &dest_path) {
+        tracing::error!("Failed to copy attachment: {}", e);
+        return;
+    }
+
+    let file_size = std::fs::metadata(&dest_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let original_filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let content_type = mime_guess::from_path(file_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    // Build appropriate Content variant based on MIME type
+    let content = if content_type.starts_with("image/") {
+        Content::Image {
+            attachment_id: dest_filename.clone(),
+            content_type,
+            width: 0,
+            height: 0,
+            size: file_size,
+            caption: None,
+            blurhash: None,
+        }
+    } else if content_type.starts_with("video/") {
+        Content::Video {
+            attachment_id: dest_filename.clone(),
+            content_type,
+            width: 0,
+            height: 0,
+            duration_ms: 0,
+            size: file_size,
+            caption: None,
+            thumbnail_id: None,
+        }
+    } else if content_type.starts_with("audio/") {
+        Content::Audio {
+            attachment_id: dest_filename.clone(),
+            content_type,
+            duration_ms: 0,
+            size: file_size,
+            waveform: None,
+        }
+    } else {
+        Content::File {
+            attachment_id: dest_filename.clone(),
+            content_type,
+            filename: original_filename.clone(),
+            size: file_size,
+        }
+    };
+
+    let preview_text = if content_type_is_image(&content) {
+        "[Image]".to_string()
+    } else if content_type_is_audio(&content) {
+        "[Voice message]".to_string()
+    } else {
+        format!("[File: {}]", original_filename)
+    };
+
+    let message = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.to_string(),
+        sender: my_id,
+        direction: MessageDirection::Outgoing,
+        status: MessageStatus::Sending,
+        content,
+        sent_at: Utc::now(),
+        server_timestamp: None,
+        delivered_at: None,
+        read_at: None,
+        quote: None,
+        reactions: Vec::new(),
+        expires_in_seconds: None,
+        expires_at: None,
+    };
+
+    let msg_repo = MessageRepository::new(&*db);
+    if let Err(e) = msg_repo.save(&message) {
+        tracing::error!("Failed to save attachment message: {}", e);
+        return;
+    }
+
+    let conv_repo = ConversationRepository::new(&*db);
+    if let Some(mut conv) = conv_repo.get(conversation_id) {
+        conv.update_last_message(&preview_text, message.sent_at);
+        let _ = conv_repo.save(&conv);
+    }
+
+    invalidate_messages_cache();
+    super::chat_list::invalidate_conversations_cache();
+
+    tracing::info!(
+        "Attachment message saved: {} ({}). Signal CDN upload is future work.",
+        dest_filename,
+        preview_text
+    );
+}
+
+fn content_type_is_image(content: &crate::signal::messages::Content) -> bool {
+    matches!(content, crate::signal::messages::Content::Image { .. })
+}
+
+fn content_type_is_audio(content: &crate::signal::messages::Content) -> bool {
+    matches!(content, crate::signal::messages::Content::Audio { .. })
 }
 
 /// Validate if a conversation ID is a valid base64-encoded group ID

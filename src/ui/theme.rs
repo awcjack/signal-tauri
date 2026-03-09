@@ -65,7 +65,7 @@ impl SignalTheme {
     /// Apply theme to egui context
     pub fn apply(&self, ctx: &egui::Context) {
         FONTS_CONFIGURED.call_once(|| {
-            configure_cjk_fonts(ctx);
+            configure_system_fonts(ctx);
         });
 
         let mut style = Style::default();
@@ -179,10 +179,61 @@ impl SignalTheme {
     }
 }
 
-fn configure_cjk_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
-    let mut cjk_loaded = false;
+/// Try to load a font from a list of candidate paths. Returns true on success.
+fn try_load_font(fonts: &mut FontDefinitions, key: &str, paths: &[&str], tweak: Option<egui::FontTweak>) -> bool {
+    for font_path in paths {
+        if let Ok(font_data) = std::fs::read(font_path) {
+            let data = if let Some(tw) = tweak {
+                FontData::from_owned(font_data).tweak(tw)
+            } else {
+                FontData::from_owned(font_data)
+            };
+            fonts.font_data.insert(key.to_owned(), data);
+            tracing::info!("Loaded system font '{}' from {}", key, font_path);
+            return true;
+        }
+    }
+    false
+}
 
+fn configure_system_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+
+    // --- System emoji font ---
+    // Note: egui's font renderer (ab_glyph) does not support color bitmap emoji
+    // (SBIX/CBDT format). Loading the system emoji font provides monochrome
+    // emoji glyph outlines as a fallback. Full-color emoji in the picker and
+    // chat messages are rendered via twemoji SVG images.
+    let emoji_font_paths: &[&str] = &[
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+        #[cfg(target_os = "windows")]
+        "C:\\Windows\\Fonts\\seguiemj.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
+    ];
+    let emoji_loaded = try_load_font(&mut fonts, "emoji", emoji_font_paths, None);
+
+    // --- System UI font ---
+    let ui_font_paths: &[&str] = &[
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/SFNS.ttf",
+        #[cfg(target_os = "macos")]
+        "/System/Library/Fonts/Helvetica.ttc",
+        #[cfg(target_os = "windows")]
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        #[cfg(target_os = "linux")]
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ];
+    let ui_font_loaded = try_load_font(&mut fonts, "system_ui", ui_font_paths, None);
+
+    // --- CJK font ---
     let cjk_font_paths: &[&str] = &[
         #[cfg(target_os = "macos")]
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -199,23 +250,19 @@ fn configure_cjk_fonts(ctx: &egui::Context) {
         #[cfg(target_os = "linux")]
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     ];
+    let cjk_loaded = try_load_font(
+        &mut fonts,
+        "cjk_fallback",
+        cjk_font_paths,
+        Some(egui::FontTweak {
+            scale: 1.0,
+            y_offset_factor: 0.0,
+            y_offset: 0.0,
+            baseline_offset_factor: 0.15,
+        }),
+    );
 
-    for font_path in cjk_font_paths {
-        if let Ok(font_data) = std::fs::read(font_path) {
-            fonts.font_data.insert(
-                "cjk_fallback".to_owned(),
-                FontData::from_owned(font_data).tweak(egui::FontTweak {
-                    scale: 1.0,
-                    y_offset_factor: 0.0,
-                    y_offset: 0.0,
-                    baseline_offset_factor: 0.15,
-                }),
-            );
-            cjk_loaded = true;
-            break;
-        }
-    }
-
+    // --- Symbol font ---
     let symbol_font_paths: &[&str] = &[
         #[cfg(target_os = "macos")]
         "/System/Library/Fonts/Supplemental/Apple Symbols.ttf",
@@ -226,31 +273,24 @@ fn configure_cjk_fonts(ctx: &egui::Context) {
         #[cfg(target_os = "windows")]
         "C:\\Windows\\Fonts\\symbol.ttf",
     ];
+    try_load_font(&mut fonts, "symbols", symbol_font_paths, None);
 
-    for font_path in symbol_font_paths {
-        if let Ok(font_data) = std::fs::read(font_path) {
-            fonts.font_data.insert(
-                "symbols".to_owned(),
-                FontData::from_owned(font_data),
-            );
-            break;
-        }
-    }
-
-    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
-        if cjk_loaded {
-            family.push("cjk_fallback".to_owned());
-        }
-        if fonts.font_data.contains_key("symbols") {
-            family.push("symbols".to_owned());
-        }
-    }
-    if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
-        if cjk_loaded {
-            family.push("cjk_fallback".to_owned());
-        }
-        if fonts.font_data.contains_key("symbols") {
-            family.push("symbols".to_owned());
+    // --- Register fallback chain ---
+    // Order: system UI → emoji → CJK → symbols (first match wins per glyph)
+    for family_key in [FontFamily::Proportional, FontFamily::Monospace] {
+        if let Some(family) = fonts.families.get_mut(&family_key) {
+            if ui_font_loaded {
+                family.push("system_ui".to_owned());
+            }
+            if emoji_loaded {
+                family.push("emoji".to_owned());
+            }
+            if cjk_loaded {
+                family.push("cjk_fallback".to_owned());
+            }
+            if fonts.font_data.contains_key("symbols") {
+                family.push("symbols".to_owned());
+            }
         }
     }
 

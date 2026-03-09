@@ -2,6 +2,7 @@
 
 pub mod avatar_cache;
 pub mod components;
+pub mod emoji_rasterizer;
 pub mod theme;
 pub mod views;
 pub mod widgets;

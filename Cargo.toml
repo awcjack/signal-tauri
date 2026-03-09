@@ -67,6 +67,9 @@ rfd = "0.15"
 cpal = "0.15"
 hound = "3.5"
 
+# Color emoji rasterization (system font support)
+swash = "0.2"
+
 # HTTP client for attachments
 # Use rustls to avoid macOS SecureTransport certificate issues
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

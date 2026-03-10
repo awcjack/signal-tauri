@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Signal-Tauri Contributors"]
 description = "A native Rust Signal Desktop client using egui"
-license = "AGPL-3.0"
+license = "MIT"
 repository = "https://github.com/user/signal-tauri"
 
 [[bin]]
